@@ -1,42 +1,98 @@
-# import pytest
-# from unittest.mock import Mock, patch, AsyncMock, MagicMock
-# import sys
-# from pathlib import Path
+from pathlib import Path
+import sys
+from types import SimpleNamespace
 
-# # Add src to path for imports
-# sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-# # Mock MCP client to prevent Gateway connection attempts
-# mock_mcp_client = Mock()
-# mock_mcp_client.list_tools_sync.return_value = []
-# mock_mcp_client.__enter__ = Mock(return_value=mock_mcp_client)
-# mock_mcp_client.__exit__ = Mock(return_value=False)
-# with patch('mcp_client.client.get_streamable_http_mcp_client', return_value=mock_mcp_client):
-#     from main import app, invoke
+import pytest
 
-# class TestAgent:
 
-#     @patch('main.load_model')
-#     @patch('main.Agent')
-#     def test_invoke_with_prompt(self, mock_agent_class, mock_load_model):
-#         """Test invoke function with user prompt"""
-#         mock_agent = Mock()
-#         mock_agent.return_value = "Test response"
-#         mock_agent_class.return_value = mock_agent
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import main  # noqa: E402
 
-#         payload = {"prompt": "Hello, how are you?"}
-#         result = invoke(payload)
 
-#         mock_agent.assert_called_once_with("Hello, how are you?")
-#         assert result == {"response": "Test response"}
+def test_invoke_with_structured_context_returns_result(monkeypatch):
+    captured = {}
 
-# class TestBedrockAgentCoreApp:
-#     def test_app_initialization(self):
-#         """Test that BedrockAgentCoreApp is properly initialized"""
-#         assert app is not None
-#         assert hasattr(app, 'entrypoint')
+    def fake_agent(prompt: str):
+        captured["prompt"] = prompt
+        return SimpleNamespace(message="generated copy")
 
-#     def test_entrypoint_decorator(self):
-#         """Test that entrypoint function is properly decorated"""
+    monkeypatch.setattr(main, "agent", fake_agent)
 
-#         assert hasattr(invoke, '__name__')
-#         assert invoke.__name__ == 'invoke'
+    payload = {
+        "prompt": "Promote our upcoming webinar.",
+        "tool_args": {
+            "channel": "email",
+            "product": "AI assistant",
+            "audience": "B2B marketers",
+            "objective": "event registration",
+            "brand_voice": "confident and concise",
+            "extra_requirements": "mention limited seats",
+        },
+    }
+
+    result = main.invoke(payload)
+
+    assert result == {"result": "generated copy"}
+    assert "Campaign inputs:" in captured["prompt"]
+    assert "- Channel: email" in captured["prompt"]
+    assert "- Product / offer: AI assistant" in captured["prompt"]
+
+
+def test_invoke_without_structured_context_uses_general_prompt(monkeypatch):
+    captured = {}
+
+    def fake_agent(prompt: str):
+        captured["prompt"] = prompt
+        return SimpleNamespace(message="general answer")
+
+    monkeypatch.setattr(main, "agent", fake_agent)
+
+    result = main.invoke({"prompt": "给我一个下季度campaign idea"})
+
+    assert result == {"result": "general answer"}
+    assert "The user is asking for help related to marketing." in captured["prompt"]
+
+
+@pytest.mark.parametrize(
+    "payload, expected_message",
+    [
+        (None, "Payload must be a JSON object."),
+        ({"prompt": "hi", "tool_args": "bad"}, "`tool_args` or `context` must be a JSON object when provided."),
+        ({"prompt": 123}, "`prompt` must be a string."),
+        ({"prompt": "", "tool_args": {}}, "Either `prompt` or at least one marketing field is required."),
+        ({"prompt": "hi", "tool_args": {"channel": "sms"}}, "`channel` must be one of:"),
+    ],
+)
+def test_invoke_validation_errors(payload, expected_message):
+    result = main.invoke(payload)
+
+    assert "error" in result
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert expected_message in result["error"]["message"]
+
+
+def test_invoke_returns_inference_error_when_agent_raises(monkeypatch):
+    def boom(_prompt: str):
+        raise RuntimeError("bedrock timeout")
+
+    monkeypatch.setattr(main, "agent", boom)
+
+    result = main.invoke({"prompt": "write ad copy"})
+
+    assert "error" in result
+    assert result["error"]["code"] == "INFERENCE_ERROR"
+    assert result["error"]["message"] == "Failed to generate a response from the model."
+    assert "RuntimeError: bedrock timeout" in result["error"]["details"]
+
+
+def test_invoke_returns_inference_error_when_agent_message_missing(monkeypatch):
+    def fake_agent(_prompt: str):
+        return SimpleNamespace(text="missing_message")
+
+    monkeypatch.setattr(main, "agent", fake_agent)
+
+    result = main.invoke({"prompt": "write ad copy"})
+
+    assert "error" in result
+    assert result["error"]["code"] == "INFERENCE_ERROR"
+    assert "Agent returned an invalid response payload." in result["error"]["details"]

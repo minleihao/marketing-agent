@@ -1,9 +1,8 @@
-# src/main.py
-
 from typing import Any, Dict
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent
+
 from model.load import load_model
 
 
@@ -22,15 +21,58 @@ Guidelines:
 - Respect the brand voice provided by the user. If none is provided, default to “professional, concise, and friendly”.
 """
 
+DEFAULT_BRAND_VOICE = "professional, concise, and friendly"
+VALID_CHANNELS = {
+    "email",
+    "linkedin",
+    "x",
+    "wechat",
+    "landing_page",
+    "other",
+}
+
 model = load_model()
 
-# You can wire tools later if needed. For now we keep the agent simple.
 agent = Agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
 )
-# AgentCore Runtime app
 app = BedrockAgentCoreApp()
+
+
+def _error_response(code: str, message: str, details: str | None = None) -> Dict[str, Any]:
+    error: Dict[str, Any] = {
+        "code": code,
+        "message": message,
+    }
+    if details:
+        error["details"] = details
+    return {"error": error}
+
+
+def _validate_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Payload must be a JSON object.")
+    return payload
+
+
+def _get_marketing_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    context = payload.get("tool_args")
+    if context is None:
+        context = payload.get("context")
+    if context is None:
+        return {}
+    if not isinstance(context, dict):
+        raise ValueError("`tool_args` or `context` must be a JSON object when provided.")
+    return context
+
+
+def _ensure_string(value: Any, field_name: str, default: str = "") -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"`{field_name}` must be a string.")
+    return value.strip()
 
 
 @app.entrypoint
@@ -51,25 +93,36 @@ def invoke(payload: Dict[str, Any]):
       }
     }
     """
+    try:
+        payload_dict = _validate_payload(payload)
+        user_prompt = _ensure_string(payload_dict.get("prompt", ""), "prompt")
+        marketing_context = _get_marketing_context(payload_dict)
 
-    user_prompt: str = payload.get("prompt", "") or ""
-    # Prefer `tool_args`, but also accept `context` for flexibility
-    marketing_context: Dict[str, Any] = (
-        payload.get("tool_args")
-        or payload.get("context")
-        or {}
-    )
+        channel = _ensure_string(marketing_context.get("channel"), "channel")
+        product = _ensure_string(marketing_context.get("product"), "product")
+        audience = _ensure_string(marketing_context.get("audience"), "audience")
+        objective = _ensure_string(marketing_context.get("objective"), "objective")
+        brand_voice = _ensure_string(
+            marketing_context.get("brand_voice"),
+            "brand_voice",
+            default=DEFAULT_BRAND_VOICE,
+        )
+        extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
 
-    channel = marketing_context.get("channel")
-    product = marketing_context.get("product")
-    audience = marketing_context.get("audience")
-    objective = marketing_context.get("objective")
-    brand_voice = marketing_context.get("brand_voice", "professional, concise, and friendly")
-    extra = marketing_context.get("extra_requirements", "")
+        if channel and channel.lower() not in VALID_CHANNELS:
+            valid = ", ".join(sorted(VALID_CHANNELS))
+            raise ValueError(f"`channel` must be one of: {valid}.")
 
-    # If structured marketing parameters are provided, build a focused prompt
-    if channel or product or audience or objective:
-        structured_prompt = f"""
+        has_structured_context = any([channel, product, audience, objective])
+        if not user_prompt and not has_structured_context:
+            raise ValueError("Either `prompt` or at least one marketing field is required.")
+
+    except ValueError as exc:
+        return _error_response("VALIDATION_ERROR", str(exc))
+
+    try:
+        if has_structured_context:
+            structured_prompt = f"""
 You are helping the marketing team craft channel-specific copy.
 
 Campaign inputs:
@@ -92,11 +145,9 @@ Please:
 User’s free-form instructions or additional context:
 {user_prompt}
 """
-        final_prompt = structured_prompt
-    else:
-        # No structured parameters: let the agent decide the best way to help,
-        # but still treat this as a marketing-oriented question.
-        final_prompt = f"""
+            final_prompt = structured_prompt
+        else:
+            final_prompt = f"""
 The user is asking for help related to marketing.
 
 First:
@@ -111,13 +162,20 @@ User message:
 {user_prompt}
 """
 
-    result = agent(final_prompt)
+        result = agent(final_prompt)
+        message = getattr(result, "message", None)
+        if not isinstance(message, str) or not message:
+            raise RuntimeError("Agent returned an invalid response payload.")
 
-    return {
-        "result": result.message,
-    }
+        return {"result": message}
+
+    except Exception as exc:  # pragma: no cover - ensures runtime safety for unexpected model/tool errors
+        return _error_response(
+            "INFERENCE_ERROR",
+            "Failed to generate a response from the model.",
+            f"{type(exc).__name__}: {exc}",
+        )
 
 
 if __name__ == "__main__":
-    # Optional local run; for development we mainly use `agentcore dev`.
     app.run()

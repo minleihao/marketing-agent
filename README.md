@@ -38,3 +38,29 @@ will work out of the box.
 After providing credentials, `agentcore deploy` will deploy your project into Amazon Bedrock AgentCore.
 
 Use `agentcore invoke` to invoke your deployed agent.
+
+# Web Frontend (Multi-user Chat)
+
+This repo now includes a web app at `src/webapp.py` with:
+- User registration and login
+- Per-user chat history isolation
+- GPT-style UI (`left`: conversation list/new conversation, `right`: active chat)
+- Admin user management (create user, enable/disable user, reset password)
+
+## Run the web app
+
+1. Install dependencies (if needed):
+   - `uv sync`
+2. Start server:
+   - `uv run uvicorn webapp:app --app-dir src --reload --port 8000`
+3. Open:
+   - `http://127.0.0.1:8000`
+
+## Default admin account
+
+- Username: `admin`
+- Password: `admin123456`
+
+You can override with environment variables before startup:
+- `NOVARED_ADMIN_USER`
+- `NOVARED_ADMIN_PASSWORD`
