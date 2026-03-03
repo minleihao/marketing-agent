@@ -1,9 +1,13 @@
+import os
 from typing import Any, Dict
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from dotenv import load_dotenv
 from strands import Agent
 
-from model.load import load_model
+from model.load import DEFAULT_MODEL_ID, load_model
+
+load_dotenv()
 
 
 SYSTEM_PROMPT = """
@@ -31,12 +35,16 @@ VALID_CHANNELS = {
     "other",
 }
 
-model = load_model()
+_agent_cache: dict[str, Agent] = {}
 
-agent = Agent(
-    model=model,
-    system_prompt=SYSTEM_PROMPT,
-)
+
+def _get_agent(model_id: str) -> Agent:
+    if model_id not in _agent_cache:
+        _agent_cache[model_id] = Agent(
+            model=load_model(model_id=model_id),
+            system_prompt=SYSTEM_PROMPT,
+        )
+    return _agent_cache[model_id]
 app = BedrockAgentCoreApp()
 
 
@@ -75,6 +83,91 @@ def _ensure_string(value: Any, field_name: str, default: str = "") -> str:
     return value.strip()
 
 
+def _is_allowed_model_id(model_id: str) -> bool:
+    allowed = os.getenv("NOVARED_ALLOWED_MODELS")
+    if not allowed:
+        return True
+    allowed_set = {x.strip() for x in allowed.split(",") if x.strip()}
+    return model_id in allowed_set
+
+
+def _is_credentials_error(exc: Exception) -> bool:
+    name = type(exc).__name__
+    details = str(exc)
+    return name in {"NoCredentialsError", "NoRegionError"} or "Unable to locate credentials" in details
+
+
+def _local_fallback_response(
+    user_prompt: str,
+    channel: str,
+    product: str,
+    audience: str,
+    objective: str,
+    brand_voice: str,
+) -> str:
+    channel_label = channel or "general"
+    product_label = product or "your product"
+    audience_label = audience or "your audience"
+    objective_label = objective or "drive results"
+
+    return f"""
+### Local Fallback Mode
+AWS credentials are not configured, so this response is generated in local fallback mode.
+
+### Campaign Summary
+- Channel: {channel_label}
+- Product: {product_label}
+- Audience: {audience_label}
+- Objective: {objective_label}
+- Brand voice: {brand_voice}
+
+### Copy Variant A
+- Hook: {product_label} for {audience_label}
+- Body: Discover how {product_label} helps {audience_label} achieve {objective_label} with a {brand_voice} tone.
+- CTA: Get started today.
+
+### Copy Variant B
+- Hook: A smarter way to reach {objective_label}
+- Body: Use {product_label} to simplify your workflow, communicate clearer value, and convert more of {audience_label}.
+- CTA: Try it now.
+
+### Your Original Prompt
+{user_prompt}
+""".strip()
+
+
+def _extract_message_text(result: Any) -> str:
+    if isinstance(result, str):
+        return result.strip()
+
+    message = getattr(result, "message", None)
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+                elif isinstance(item, str):
+                    chunks.append(item)
+            return "\n".join([x for x in chunks if x]).strip()
+
+    content = getattr(result, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks = [x for x in content if isinstance(x, str)]
+        return "\n".join(chunks).strip()
+
+    return ""
+
+
 @app.entrypoint
 def invoke(payload: Dict[str, Any]):
     """
@@ -108,10 +201,13 @@ def invoke(payload: Dict[str, Any]):
             default=DEFAULT_BRAND_VOICE,
         )
         extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
+        model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
 
         if channel and channel.lower() not in VALID_CHANNELS:
             valid = ", ".join(sorted(VALID_CHANNELS))
             raise ValueError(f"`channel` must be one of: {valid}.")
+        if not _is_allowed_model_id(model_id):
+            raise ValueError(f"`model_id` is not allowed: {model_id}")
 
         has_structured_context = any([channel, product, audience, objective])
         if not user_prompt and not has_structured_context:
@@ -162,14 +258,30 @@ User message:
 {user_prompt}
 """
 
+        agent = _get_agent(model_id)
         result = agent(final_prompt)
-        message = getattr(result, "message", None)
-        if not isinstance(message, str) or not message:
+        message = _extract_message_text(result)
+        if not message:
             raise RuntimeError("Agent returned an invalid response payload.")
 
         return {"result": message}
 
     except Exception as exc:  # pragma: no cover - ensures runtime safety for unexpected model/tool errors
+        if _is_credentials_error(exc):
+            return {
+                "result": _local_fallback_response(
+                    user_prompt=user_prompt,
+                    channel=channel,
+                    product=product,
+                    audience=audience,
+                    objective=objective,
+                    brand_voice=brand_voice,
+                ),
+                "meta": {
+                    "mode": "local_fallback",
+                    "reason": "missing_aws_credentials",
+                },
+            }
         return _error_response(
             "INFERENCE_ERROR",
             "Failed to generate a response from the model.",

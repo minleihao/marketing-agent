@@ -3,22 +3,34 @@ import hmac
 import os
 import secrets
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from main import invoke
+from model.load import DEFAULT_MODEL_ID
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "webapp.db"
 SESSION_COOKIE = "nova_session"
 SESSION_DAYS = 7
+MAX_DOC_SIZE_BYTES = 3 * 1024 * 1024
+MAX_DOC_PREVIEW_CHARS = 6000
+
+SUPPORTED_MODELS = [
+    "us.amazon.nova-micro-v1:0",
+    "us.amazon.nova-lite-v1:0",
+    "us.amazon.nova-pro-v1:0",
+]
+SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".log", ".py", ".html", ".xml", ".yaml", ".yml"}
 
 DEFAULT_ADMIN_USER = os.getenv("NOVARED_ADMIN_USER", "admin")
 DEFAULT_ADMIN_PASSWORD = os.getenv("NOVARED_ADMIN_PASSWORD", "admin123456")
@@ -47,6 +59,7 @@ def verify_password(password: str, salt_hex: str, password_hash: str) -> bool:
 
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with db_conn() as conn:
         conn.executescript(
             """
@@ -73,6 +86,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
+                model_id TEXT NOT NULL DEFAULT 'us.amazon.nova-micro-v1:0',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -86,8 +100,27 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             );
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT,
+                file_path TEXT NOT NULL,
+                text_content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            );
             """
         )
+
+        conversation_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        if "model_id" not in conversation_cols:
+            conn.execute(
+                f"ALTER TABLE conversations ADD COLUMN model_id TEXT NOT NULL DEFAULT '{DEFAULT_MODEL_ID}'"
+            )
 
         admin_exists = conn.execute(
             "SELECT id FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)
@@ -180,6 +213,47 @@ def conversation_owner_or_404(user_id: int, conversation_id: int) -> sqlite3.Row
     return row
 
 
+def allowed_models() -> list[str]:
+    configured = os.getenv("NOVARED_ALLOWED_MODELS")
+    if configured:
+        custom = [x.strip() for x in configured.split(",") if x.strip()]
+        return custom or [DEFAULT_MODEL_ID]
+    return SUPPORTED_MODELS
+
+
+def _extract_text_from_upload(filename: str, raw: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_TEXT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {suffix or 'unknown'}. Supported: {', '.join(sorted(SUPPORTED_TEXT_EXTENSIONS))}",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+    return text[:MAX_DOC_PREVIEW_CHARS]
+
+
+def _build_document_context(conversation_id: int) -> str:
+    with db_conn() as conn:
+        docs = conn.execute(
+            """
+            SELECT filename, text_content
+            FROM documents
+            WHERE conversation_id = ?
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+    if not docs:
+        return ""
+    parts = ["Attached documents context (use when relevant):"]
+    for doc in docs:
+        parts.append(f"\n[Document: {doc['filename']}]\n{doc['text_content']}")
+    return "\n".join(parts)
+
+
 class RegisterInput(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     password: str = Field(min_length=8, max_length=128)
@@ -220,11 +294,14 @@ AUTH_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>novaRed 登录</title>
+  <title>novaRed</title>
   <style>
     :root { --bg:#f5f7fb; --card:#ffffff; --line:#d9deea; --txt:#1b2430; --muted:#5a6472; --accent:#1f6feb; }
     * { box-sizing:border-box; }
     body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:linear-gradient(160deg,#eef3ff,#f9fafc 45%,#ecf7f3); color:var(--txt); min-height:100vh; display:grid; place-items:center; }
+    .lang { position:fixed; top:14px; right:14px; display:flex; gap:6px; }
+    .lang button { width:auto; padding:7px 10px; border:1px solid var(--line); background:#fff; color:var(--txt); }
+    .lang button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
     .wrap { width:min(900px,94vw); display:grid; grid-template-columns:1fr 1fr; gap:16px; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 12px 40px rgba(22,34,66,.06); }
     h2 { margin:0 0 10px; }
@@ -237,27 +314,87 @@ AUTH_HTML = """
   </style>
 </head>
 <body>
+  <div class="lang">
+    <button id="lang-zh" onclick="setLang('zh')">中文</button>
+    <button id="lang-en" onclick="setLang('en')">EN</button>
+  </div>
   <div class="wrap">
     <div class="card">
-      <h2>登录</h2>
-      <p>进入你的营销 Agent 工作台。</p>
-      <input id="login-username" placeholder="用户名" />
-      <input id="login-password" placeholder="密码" type="password" />
-      <button onclick="login()">登录</button>
+      <h2 data-i18n="login_title">登录</h2>
+      <p data-i18n="login_subtitle">进入你的营销 Agent 工作台。</p>
+      <input id="login-username" data-i18n-placeholder="username" placeholder="用户名" />
+      <input id="login-password" data-i18n-placeholder="password" placeholder="密码" type="password" />
+      <button onclick="login()" data-i18n="login_btn">登录</button>
       <div id="login-err" class="err"></div>
-      <div class="note">首次可用默认管理员账号：admin / admin123456</div>
+      <div class="note" data-i18n="default_admin">首次可用默认管理员账号：admin / admin123456</div>
     </div>
     <div class="card">
-      <h2>注册</h2>
-      <p>创建个人账号后可保存自己的对话记录。</p>
-      <input id="reg-username" placeholder="用户名（3-32 位）" />
-      <input id="reg-password" placeholder="密码（至少 8 位）" type="password" />
-      <button onclick="registerUser()">创建账号</button>
+      <h2 data-i18n="register_title">注册</h2>
+      <p data-i18n="register_subtitle">创建个人账号后可保存自己的对话记录。</p>
+      <input id="reg-username" data-i18n-placeholder="reg_username" placeholder="用户名（3-32 位）" />
+      <input id="reg-password" data-i18n-placeholder="reg_password" placeholder="密码（至少 8 位）" type="password" />
+      <button onclick="registerUser()" data-i18n="register_btn">创建账号</button>
       <div id="reg-err" class="err"></div>
     </div>
   </div>
 
 <script>
+const I18N = {
+  zh: {
+    page_title: 'novaRed 登录',
+    login_title: '登录',
+    login_subtitle: '进入你的营销 Agent 工作台。',
+    login_btn: '登录',
+    register_title: '注册',
+    register_subtitle: '创建个人账号后可保存自己的对话记录。',
+    register_btn: '创建账号',
+    username: '用户名',
+    password: '密码',
+    reg_username: '用户名（3-32 位）',
+    reg_password: '密码（至少 8 位）',
+    default_admin: '首次可用默认管理员账号：admin / admin123456',
+    login_failed: '登录失败',
+    register_failed: '注册失败'
+  },
+  en: {
+    page_title: 'novaRed Sign In',
+    login_title: 'Sign In',
+    login_subtitle: 'Access your marketing agent workspace.',
+    login_btn: 'Sign In',
+    register_title: 'Register',
+    register_subtitle: 'Create your account to keep your own chat history.',
+    register_btn: 'Create Account',
+    username: 'Username',
+    password: 'Password',
+    reg_username: 'Username (3-32 chars)',
+    reg_password: 'Password (at least 8 chars)',
+    default_admin: 'Default admin account: admin / admin123456',
+    login_failed: 'Login failed',
+    register_failed: 'Registration failed'
+  }
+};
+
+let currentLang = localStorage.getItem('nova_lang') || 'zh';
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || key;
+}
+
+function applyI18n() {
+  document.title = t('page_title');
+  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
+  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+}
+
+function setLang(lang) {
+  currentLang = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('nova_lang', currentLang);
+  applyI18n();
+}
+
 async function login() {
   const username = document.getElementById('login-username').value.trim();
   const password = document.getElementById('login-password').value;
@@ -265,7 +402,7 @@ async function login() {
   err.textContent = '';
   const res = await fetch('/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password})});
   const data = await res.json();
-  if (!res.ok) { err.textContent = data.detail || '登录失败'; return; }
+  if (!res.ok) { err.textContent = data.detail || t('login_failed'); return; }
   location.href = '/app';
 }
 
@@ -276,9 +413,10 @@ async function registerUser() {
   err.textContent = '';
   const res = await fetch('/register', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password})});
   const data = await res.json();
-  if (!res.ok) { err.textContent = data.detail || '注册失败'; return; }
+  if (!res.ok) { err.textContent = data.detail || t('register_failed'); return; }
   location.href = '/app';
 }
+applyI18n();
 </script>
 </body>
 </html>
@@ -307,9 +445,14 @@ APP_HTML = """
     .chat-item.active { border-color:var(--accent); box-shadow:0 0 0 2px rgba(15,111,255,.15); }
     .chat-title { font-size:14px; font-weight:600; }
     .chat-time { font-size:12px; color:var(--muted); margin-top:4px; }
+    .lang { display:flex; gap:6px; }
+    .lang .btn { padding:6px 9px; }
+    .lang .btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 
     .main { display:grid; grid-template-rows:auto 1fr auto; }
     .head { border-bottom:1px solid var(--line); background:#fff; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; }
+    .head-controls { display:flex; gap:8px; align-items:center; }
+    .head-controls select { border:1px solid var(--line); border-radius:10px; padding:7px; background:#fff; }
     .messages { padding:18px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
     .msg { max-width:840px; border:1px solid var(--line); border-radius:12px; padding:12px; line-height:1.5; white-space:pre-wrap; }
     .msg.user { background:var(--user); align-self:flex-end; }
@@ -317,6 +460,10 @@ APP_HTML = """
     .composer { border-top:1px solid var(--line); background:#fff; padding:12px; }
     textarea { width:100%; min-height:90px; resize:vertical; border:1px solid var(--line); border-radius:10px; padding:10px; }
     .action { margin-top:8px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .upload { margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .doc-list { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
+    .doc-pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid var(--line); border-radius:999px; padding:4px 10px; background:#fff; }
+    .doc-pill button { border:0; background:transparent; cursor:pointer; color:#b42318; font-size:12px; padding:0; }
     .hint { font-size:12px; color:var(--muted); }
 
     @media (max-width: 900px) {
@@ -329,8 +476,12 @@ APP_HTML = """
   <div class="root">
     <aside class="sidebar">
       <div class="topline">
-        <strong>会话记录</strong>
-        <button class="btn accent" onclick="createConversation()">+ 新对话</button>
+        <strong data-i18n="conversation_list">会话记录</strong>
+        <button class="btn accent" onclick="createConversation()" data-i18n="new_conversation">+ 新对话</button>
+      </div>
+      <div class="lang">
+        <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
+        <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
       </div>
       <div class="badge" id="user-badge"></div>
       <div class="chat-list" id="chat-list"></div>
@@ -338,40 +489,168 @@ APP_HTML = """
 
     <section class="main">
       <div class="head">
-        <strong id="chat-title">未选择会话</strong>
-        <div>
-          <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none">用户管理</button>
-          <button class="btn" onclick="logout()">退出</button>
+        <strong id="chat-title" data-i18n="no_conversation">未选择会话</strong>
+        <div class="head-controls">
+          <label for="model-select" data-i18n="model_label">模型</label>
+          <select id="model-select" onchange="changeModel()"></select>
+          <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
+          <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
+          <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
         </div>
       </div>
 
       <div class="messages" id="messages"></div>
 
       <div class="composer">
-        <textarea id="input" placeholder="输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案"></textarea>
+        <textarea id="input" data-i18n-placeholder="input_placeholder" placeholder="输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案"></textarea>
+        <div class="upload">
+          <label for="doc-file" data-i18n="upload_label">上传文档</label>
+          <input id="doc-file" type="file" />
+          <button class="btn" onclick="uploadDocument()" data-i18n="upload_btn">上传</button>
+        </div>
+        <div class="doc-list" id="doc-list"></div>
         <div class="action">
-          <span class="hint">每个用户仅能访问自己的会话和消息。</span>
-          <button class="btn accent" onclick="sendMessage()">发送</button>
+          <span class="hint" data-i18n="hint">每个用户仅能访问自己的会话和消息。</span>
+          <button class="btn accent" onclick="sendMessage()" data-i18n="send">发送</button>
         </div>
       </div>
     </section>
   </div>
 
 <script>
+const I18N = {
+  zh: {
+    page_title: 'novaRed Chat',
+    conversation_list: '会话记录',
+    new_conversation: '+ 新对话',
+    no_conversation: '未选择会话',
+    model_label: '模型',
+    delete_chat: '删除聊天',
+    user_mgmt: '用户管理',
+    logout: '退出',
+    upload_label: '上传文档',
+    upload_btn: '上传',
+    input_placeholder: '输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案',
+    hint: '每个用户仅能访问自己的会话和消息。',
+    send: '发送',
+    current_user: '当前用户',
+    thinking: '思考中...',
+    request_failed: '请求失败',
+    request_error: '请求失败',
+    default_chat_title: '新对话',
+    upload_failed: '上传失败',
+    upload_success: '上传成功',
+    delete_confirm: '确定删除该聊天及其所有消息与文档吗？',
+    no_chat_selected: '请先选择一个聊天',
+    documents_title: '文档'
+  },
+  en: {
+    page_title: 'novaRed Chat',
+    conversation_list: 'Conversations',
+    new_conversation: '+ New Chat',
+    no_conversation: 'No conversation selected',
+    model_label: 'Model',
+    delete_chat: 'Delete Chat',
+    user_mgmt: 'User Management',
+    logout: 'Log Out',
+    upload_label: 'Upload document',
+    upload_btn: 'Upload',
+    input_placeholder: 'Type your marketing task, e.g., write 3 LinkedIn hooks for a B2B SaaS launch',
+    hint: 'Each user can only access their own conversations and messages.',
+    send: 'Send',
+    current_user: 'Current user',
+    thinking: 'Thinking...',
+    request_failed: 'Request failed',
+    request_error: 'Request failed',
+    default_chat_title: 'New Chat',
+    upload_failed: 'Upload failed',
+    upload_success: 'Upload succeeded',
+    delete_confirm: 'Delete this chat with all messages and documents?',
+    no_chat_selected: 'Please select a conversation first',
+    documents_title: 'Documents'
+  }
+};
+
 let me = null;
 let conversations = [];
+let models = [];
 let activeConversationId = null;
+let activeDocuments = [];
+let currentLang = localStorage.getItem('nova_lang') || 'zh';
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || key;
+}
+
+function setLang(lang) {
+  currentLang = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('nova_lang', currentLang);
+  applyI18n();
+}
+
+function applyI18n() {
+  document.title = t('page_title');
+  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
+  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+  if (!activeConversationId) {
+    document.getElementById('chat-title').textContent = t('no_conversation');
+  }
+  if (me) {
+    document.getElementById('user-badge').textContent = `${t('current_user')}: ${me.username}`;
+  }
+}
 
 async function api(url, options={}) {
-  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const headers = options.body instanceof FormData ? {} : {'Content-Type':'application/json'};
+  const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch (_) {}
-  if (!res.ok) throw new Error(data.detail || '请求失败');
+  if (!res.ok) throw new Error(data.detail || t('request_failed'));
   return data;
 }
 
 function fmt(ts) {
   try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+
+function renderDocuments() {
+  const box = document.getElementById('doc-list');
+  box.innerHTML = '';
+  for (const d of activeDocuments) {
+    const item = document.createElement('div');
+    item.className = 'doc-pill';
+    item.innerHTML = `<span>${d.filename}</span><button title="delete" onclick="deleteDocument(${d.id})">x</button>`;
+    box.appendChild(item);
+  }
+}
+
+function syncModelSelect() {
+  const select = document.getElementById('model-select');
+  select.innerHTML = '';
+  for (const m of models) {
+    const option = document.createElement('option');
+    option.value = m;
+    option.textContent = m;
+    select.appendChild(option);
+  }
+  const active = conversations.find(x => x.id === activeConversationId);
+  if (active && active.model_id) {
+    select.value = active.model_id;
+  }
+}
+
+async function loadModels() {
+  const data = await api('/api/models');
+  models = data.models || [];
+  syncModelSelect();
+}
+
+async function loadDocuments(conversationId) {
+  activeDocuments = await api(`/api/conversations/${conversationId}/documents`);
+  renderDocuments();
 }
 
 function renderConversations() {
@@ -400,7 +679,7 @@ function renderMessages(items) {
 
 async function loadMe() {
   me = await api('/api/me');
-  document.getElementById('user-badge').textContent = `当前用户：${me.username}`;
+  document.getElementById('user-badge').textContent = `${t('current_user')}: ${me.username}`;
   if (me.is_admin) document.getElementById('admin-btn').style.display = 'inline-block';
 }
 
@@ -408,17 +687,23 @@ async function loadConversations() {
   conversations = await api('/api/conversations');
   renderConversations();
   if (!activeConversationId && conversations.length) {
-    openConversation(conversations[0].id);
+    await openConversation(conversations[0].id);
   }
 }
 
 async function createConversation() {
   const created = await api('/api/conversations', {method:'POST', body:JSON.stringify({})});
+  if (created.title === '新对话') {
+    created.title = t('default_chat_title');
+  }
   conversations.unshift(created);
   activeConversationId = created.id;
   renderConversations();
   document.getElementById('chat-title').textContent = created.title;
   renderMessages([]);
+  activeDocuments = [];
+  renderDocuments();
+  syncModelSelect();
 }
 
 async function openConversation(id) {
@@ -428,6 +713,62 @@ async function openConversation(id) {
   renderConversations();
   const items = await api(`/api/conversations/${id}/messages`);
   renderMessages(items);
+  await loadDocuments(id);
+  syncModelSelect();
+}
+
+async function changeModel() {
+  if (!activeConversationId) return;
+  const modelId = document.getElementById('model-select').value;
+  const data = await api(`/api/conversations/${activeConversationId}/model`, {
+    method:'PATCH',
+    body: JSON.stringify({ model_id: modelId })
+  });
+  conversations = conversations.map(c => c.id === activeConversationId ? {...c, model_id: data.model_id} : c);
+}
+
+async function deleteConversation() {
+  if (!activeConversationId) {
+    alert(t('no_chat_selected'));
+    return;
+  }
+  if (!confirm(t('delete_confirm'))) return;
+  await api(`/api/conversations/${activeConversationId}`, {method:'DELETE'});
+  activeConversationId = null;
+  await loadConversations();
+  if (!conversations.length) {
+    document.getElementById('chat-title').textContent = t('no_conversation');
+    renderMessages([]);
+    activeDocuments = [];
+    renderDocuments();
+  }
+}
+
+async function uploadDocument() {
+  if (!activeConversationId) {
+    alert(t('no_chat_selected'));
+    return;
+  }
+  const fileInput = document.getElementById('doc-file');
+  if (!fileInput.files || !fileInput.files.length) return;
+  const form = new FormData();
+  form.append('file', fileInput.files[0]);
+  try {
+    await api(`/api/conversations/${activeConversationId}/documents`, {
+      method:'POST',
+      body: form
+    });
+    fileInput.value = '';
+    await loadDocuments(activeConversationId);
+  } catch (e) {
+    alert(`${t('upload_failed')}: ${e.message}`);
+  }
+}
+
+async function deleteDocument(documentId) {
+  if (!activeConversationId) return;
+  await api(`/api/conversations/${activeConversationId}/documents/${documentId}`, {method:'DELETE'});
+  await loadDocuments(activeConversationId);
 }
 
 async function sendMessage() {
@@ -445,7 +786,7 @@ async function sendMessage() {
 
   const pendingBot = document.createElement('div');
   pendingBot.className = 'msg assistant';
-  pendingBot.textContent = '思考中...';
+  pendingBot.textContent = t('thinking');
   box.appendChild(pendingBot);
   box.scrollTop = box.scrollHeight;
 
@@ -458,7 +799,7 @@ async function sendMessage() {
     await loadConversations();
     renderConversations();
   } catch (e) {
-    pendingBot.textContent = `请求失败：${e.message}`;
+    pendingBot.textContent = `${t('request_error')}: ${e.message}`;
   }
 }
 
@@ -471,7 +812,9 @@ function gotoAdmin() { location.href = '/admin'; }
 
 (async function init(){
   try {
+    applyI18n();
     await loadMe();
+    await loadModels();
     await loadConversations();
   } catch {
     location.href = '/';
@@ -489,11 +832,13 @@ ADMIN_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>用户管理</title>
+  <title>Admin</title>
   <style>
     body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f6f8fc; color:#1f2a37; }
     .wrap { max-width:980px; margin:20px auto; padding:0 14px; }
     .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+    .toolbar { display:flex; gap:6px; align-items:center; }
+    .toolbar button.active { background:#0f6fff; color:#fff; border-color:#0f6fff; }
     .card { background:#fff; border:1px solid #d8deea; border-radius:12px; padding:14px; margin-bottom:14px; }
     input, select { padding:8px; border:1px solid #d8deea; border-radius:8px; margin-right:6px; }
     button { padding:8px 10px; border:1px solid #d8deea; border-radius:8px; background:#fff; cursor:pointer; }
@@ -505,40 +850,136 @@ ADMIN_HTML = """
 <body>
   <div class="wrap">
     <div class="top">
-      <h2>用户管理</h2>
-      <div>
-        <button onclick="back()">返回聊天</button>
-        <button onclick="logout()">退出</button>
+      <h2 data-i18n="title">用户管理</h2>
+      <div class="toolbar">
+        <button id="lang-zh" onclick="setLang('zh')">中文</button>
+        <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="back()" data-i18n="back">返回聊天</button>
+        <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
     </div>
 
     <div class="card">
-      <h3>创建用户</h3>
-      <input id="new-name" placeholder="用户名" />
-      <input id="new-pass" placeholder="密码" type="password" />
+      <h3 data-i18n="create_user">创建用户</h3>
+      <input id="new-name" data-i18n-placeholder="username" placeholder="用户名" />
+      <input id="new-pass" data-i18n-placeholder="password" placeholder="密码" type="password" />
       <select id="new-admin">
-        <option value="false">普通用户</option>
-        <option value="true">管理员</option>
+        <option value="false" data-i18n="normal_user">普通用户</option>
+        <option value="true" data-i18n="admin_user">管理员</option>
       </select>
-      <button onclick="createUser()">创建</button>
+      <button onclick="createUser()" data-i18n="create">创建</button>
       <div class="small" id="create-msg"></div>
     </div>
 
     <div class="card">
-      <h3>用户列表</h3>
+      <h3 data-i18n="user_list">用户列表</h3>
       <table>
-        <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th data-i18n="th_username">用户名</th>
+            <th data-i18n="th_role">角色</th>
+            <th data-i18n="th_status">状态</th>
+            <th data-i18n="th_created_at">创建时间</th>
+            <th data-i18n="th_action">操作</th>
+          </tr>
+        </thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
   </div>
 
 <script>
+const I18N = {
+  zh: {
+    page_title: '用户管理',
+    title: '用户管理',
+    back: '返回聊天',
+    logout: '退出',
+    create_user: '创建用户',
+    username: '用户名',
+    password: '密码',
+    normal_user: '普通用户',
+    admin_user: '管理员',
+    create: '创建',
+    user_list: '用户列表',
+    th_username: '用户名',
+    th_role: '角色',
+    th_status: '状态',
+    th_created_at: '创建时间',
+    th_action: '操作',
+    role_admin: '管理员',
+    role_user: '普通用户',
+    status_active: '启用',
+    status_disabled: '禁用',
+    action_disable: '禁用',
+    action_enable: '启用',
+    action_reset: '重置密码',
+    created_success: '创建成功',
+    created_failed: '创建失败',
+    request_failed: '请求失败',
+    prompt_new_password: '输入新密码（至少8位）',
+    reset_ok: '密码已重置'
+  },
+  en: {
+    page_title: 'User Management',
+    title: 'User Management',
+    back: 'Back to Chat',
+    logout: 'Log Out',
+    create_user: 'Create User',
+    username: 'Username',
+    password: 'Password',
+    normal_user: 'Standard User',
+    admin_user: 'Admin',
+    create: 'Create',
+    user_list: 'Users',
+    th_username: 'Username',
+    th_role: 'Role',
+    th_status: 'Status',
+    th_created_at: 'Created At',
+    th_action: 'Actions',
+    role_admin: 'Admin',
+    role_user: 'Standard',
+    status_active: 'Active',
+    status_disabled: 'Disabled',
+    action_disable: 'Disable',
+    action_enable: 'Enable',
+    action_reset: 'Reset Password',
+    created_success: 'Created successfully',
+    created_failed: 'Create failed',
+    request_failed: 'Request failed',
+    prompt_new_password: 'Enter new password (at least 8 characters)',
+    reset_ok: 'Password reset successfully'
+  }
+};
+
+let currentLang = localStorage.getItem('nova_lang') || 'zh';
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || key;
+}
+
+function applyI18n() {
+  document.title = t('page_title');
+  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
+  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+}
+
+function setLang(lang) {
+  currentLang = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('nova_lang', currentLang);
+  applyI18n();
+  loadUsers();
+}
+
 async function api(url, options={}) {
   const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error(data.detail || '请求失败');
+  if (!res.ok) throw new Error(data.detail || t('request_failed'));
   return data;
 }
 
@@ -555,12 +996,12 @@ async function loadUsers() {
     tr.innerHTML = `
       <td>${u.id}</td>
       <td>${u.username}</td>
-      <td>${u.is_admin ? '管理员' : '普通用户'}</td>
-      <td>${u.is_active ? '启用' : '禁用'}</td>
+      <td>${u.is_admin ? t('role_admin') : t('role_user')}</td>
+      <td>${u.is_active ? t('status_active') : t('status_disabled')}</td>
       <td>${fmt(u.created_at)}</td>
       <td>
-        <button onclick="toggleUser(${u.id}, ${u.is_active})">${u.is_active ? '禁用' : '启用'}</button>
-        <button onclick="resetPwd(${u.id})">重置密码</button>
+        <button onclick="toggleUser(${u.id}, ${u.is_active})">${u.is_active ? t('action_disable') : t('action_enable')}</button>
+        <button onclick="resetPwd(${u.id})">${t('action_reset')}</button>
       </td>
     `;
     rows.appendChild(tr);
@@ -574,10 +1015,10 @@ async function createUser() {
   const msg = document.getElementById('create-msg');
   try {
     await api('/api/admin/users', {method:'POST', body:JSON.stringify({username,password,is_admin})});
-    msg.textContent = '创建成功';
+    msg.textContent = t('created_success');
     await loadUsers();
   } catch (e) {
-    msg.textContent = `创建失败：${e.message}`;
+    msg.textContent = `${t('created_failed')}: ${e.message}`;
   }
 }
 
@@ -587,15 +1028,16 @@ async function toggleUser(userId, current) {
 }
 
 async function resetPwd(userId) {
-  const newPwd = prompt('输入新密码（至少8位）');
+  const newPwd = prompt(t('prompt_new_password'));
   if (!newPwd) return;
   await api(`/api/admin/users/${userId}/password`, {method:'POST', body:JSON.stringify({new_password:newPwd})});
-  alert('密码已重置');
+  alert(t('reset_ok'));
 }
 
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function back() { location.href = '/app'; }
 
+applyI18n();
 loadUsers().catch(() => location.href = '/app');
 </script>
 </body>
@@ -704,7 +1146,7 @@ def list_conversations(request: Request) -> Any:
     with db_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, title, created_at, updated_at
+            SELECT id, title, model_id, created_at, updated_at
             FROM conversations
             WHERE user_id = ?
             ORDER BY updated_at DESC
@@ -719,18 +1161,69 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     user = must_login(request)
     title = (body.title or "新对话").strip() or "新对话"
     now = now_utc().isoformat()
+    model_id = DEFAULT_MODEL_ID
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (user["id"], title[:120], now, now),
+            "INSERT INTO conversations (user_id, title, model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (user["id"], title[:120], model_id, now, now),
         )
         conv_id = cur.lastrowid
     return {
         "id": conv_id,
         "title": title[:120],
+        "model_id": model_id,
         "created_at": now,
         "updated_at": now,
     }
+
+
+class ConversationModelInput(BaseModel):
+    model_id: str = Field(min_length=3, max_length=128)
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: int, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    with db_conn() as conn:
+        doc_rows = conn.execute(
+            "SELECT file_path FROM documents WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+        for doc in doc_rows:
+            path = Path(doc["file_path"])
+            if path.exists():
+                path.unlink()
+        conn.execute("DELETE FROM documents WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    return {"ok": True}
+
+
+@app.get("/api/models")
+def list_models(request: Request) -> Any:
+    must_login(request)
+    models = allowed_models()
+    return {
+        "models": models,
+        "default_model_id": DEFAULT_MODEL_ID if DEFAULT_MODEL_ID in models else models[0],
+    }
+
+
+@app.patch("/api/conversations/{conversation_id}/model")
+def update_conversation_model(conversation_id: int, body: ConversationModelInput, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    model_id = body.model_id.strip()
+    if model_id not in allowed_models():
+        raise HTTPException(status_code=400, detail=f"Unsupported model_id: {model_id}")
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE conversations SET model_id = ?, updated_at = ? WHERE id = ?",
+            (model_id, now, conversation_id),
+        )
+    return {"ok": True, "model_id": model_id, "updated_at": now}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")
@@ -748,6 +1241,91 @@ def list_messages(conversation_id: int, request: Request) -> Any:
             (conversation_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/conversations/{conversation_id}/documents")
+def list_documents(conversation_id: int, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, filename, content_type, created_at
+            FROM documents
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            """,
+            (conversation_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/conversations/{conversation_id}/documents")
+async def upload_document(conversation_id: int, request: Request, file: UploadFile = File(...)) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="File is empty")
+    if len(raw) > MAX_DOC_SIZE_BYTES:
+        raise HTTPException(status_code=400, detail=f"File too large (max {MAX_DOC_SIZE_BYTES} bytes)")
+
+    text_content = _extract_text_from_upload(file.filename, raw)
+    stored_name = f"{uuid.uuid4().hex}_{Path(file.filename).name}"
+    conversation_dir = UPLOAD_DIR / str(conversation_id)
+    conversation_dir.mkdir(parents=True, exist_ok=True)
+    file_path = conversation_dir / stored_name
+    with file_path.open("wb") as f:
+        f.write(raw)
+
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO documents (conversation_id, filename, content_type, file_path, text_content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conversation_id,
+                Path(file.filename).name,
+                file.content_type,
+                str(file_path),
+                text_content,
+                now,
+            ),
+        )
+        doc_id = cur.lastrowid
+        conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (now, conversation_id),
+        )
+    return {
+        "id": doc_id,
+        "filename": Path(file.filename).name,
+        "content_type": file.content_type,
+        "created_at": now,
+    }
+
+
+@app.delete("/api/conversations/{conversation_id}/documents/{document_id}")
+def delete_document(conversation_id: int, document_id: int, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, file_path FROM documents WHERE id = ? AND conversation_id = ?",
+            (document_id, conversation_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        path = Path(row["file_path"])
+        if path.exists():
+            path.unlink()
+    return {"ok": True}
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
@@ -772,8 +1350,15 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "audience": body.audience,
         "objective": body.objective,
         "brand_voice": body.brand_voice,
-        "extra_requirements": body.extra_requirements,
+        "model_id": conversation["model_id"],
     }
+    extra_parts = []
+    if body.extra_requirements:
+        extra_parts.append(body.extra_requirements)
+    doc_context = _build_document_context(conversation_id)
+    if doc_context:
+        extra_parts.append(doc_context)
+    context["extra_requirements"] = "\n\n".join(extra_parts) if extra_parts else None
 
     agent_output = invoke({"prompt": content, "tool_args": context})
     if "error" in agent_output:
