@@ -1,108 +1,123 @@
-import os
-from strands import Agent, tool
-from strands_tools.code_interpreter import AgentCoreCodeInterpreter
-from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
-from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+# src/main.py
+
+from typing import Any, Dict
+
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from mcp_client.client import get_streamable_http_mcp_client
+from strands import Agent
 from model.load import load_model
 
+
+SYSTEM_PROMPT = """
+You are the in-house marketing co-pilot for our company.
+
+You primarily support:
+- Campaign planning and messaging.
+- Channel-specific copywriting (email, LinkedIn, X/Twitter, WeChat, landing pages, in-product banners).
+- Light analysis of campaign performance and suggestions based on user-provided metrics.
+
+Guidelines:
+- If the user request is ambiguous, ask exactly one clarifying question.
+- When generating copy, prefer giving 2–3 variants so the marketing team can choose.
+- Keep outputs structured in clear Markdown sections that are easy to copy-paste into tools like HubSpot, Marketo, social schedulers, or slide decks.
+- Respect the brand voice provided by the user. If none is provided, default to “professional, concise, and friendly”.
+"""
+
+model = load_model()
+
+# You can wire tools later if needed. For now we keep the agent simple.
+agent = Agent(
+    model=model,
+    system_prompt=SYSTEM_PROMPT,
+)
+# AgentCore Runtime app
 app = BedrockAgentCoreApp()
-log = app.logger
 
-MEMORY_ID = os.getenv("BEDROCK_AGENTCORE_MEMORY_ID")
-REGION = os.getenv("AWS_REGION")
-
-# Import AgentCore Gateway as Streamable HTTP MCP Client
-mcp_client = get_streamable_http_mcp_client()
-
-# Define a simple function tool
-@tool
-def add_numbers(a: int, b: int) -> int:
-    """Return the sum of two numbers"""
-    return a+b
 
 @app.entrypoint
-async def invoke(payload, context):
-    session_id = getattr(context, 'session_id', 'default')
-    user_id = payload.get("user_id") or 'default-user'
-    
-    # Configure memory
-    session_manager = None
-    if MEMORY_ID:
-        session_manager = AgentCoreMemorySessionManager(
-            AgentCoreMemoryConfig(
-                memory_id=MEMORY_ID,
-                session_id=session_id,
-                actor_id=user_id,
-                retrieval_config={
-                    f"/facts/{user_id}/": RetrievalConfig(top_k=10, relevance_score=0.4),
-                    f"/preferences/{user_id}/": RetrievalConfig(top_k=5, relevance_score=0.5),
-                    f"/summaries/{user_id}/{session_id}/": RetrievalConfig(top_k=5, relevance_score=0.4),
-                    f"/episodes/{user_id}/{session_id}/": RetrievalConfig(top_k=5, relevance_score=0.4),
-                }
-            ),
-            REGION
-        )
-    else:
-        log.warning("MEMORY_ID is not set. Skipping memory session manager initialization.")
+def invoke(payload: Dict[str, Any]):
+    """
+    AgentCore Runtime entrypoint.
 
-    
-    # Create code interpreter
-    code_interpreter = AgentCoreCodeInterpreter(
-        region=REGION,
-        session_name=session_id,
-        auto_create=True,
-        persist_sessions=True
+    Expected payload shape:
+    {
+      "prompt": "<free-form user request>",
+      "tool_args": {
+         "channel": "email | linkedin | x | wechat | landing_page | other",
+         "product": "<what we are promoting>",
+         "audience": "<who we are targeting>",
+         "objective": "<lead gen | sign-up | brand awareness | event registration | etc.>",
+         "brand_voice": "<tone description>",
+         "extra_requirements": "<additional constraints or instructions>"
+      }
+    }
+    """
+
+    user_prompt: str = payload.get("prompt", "") or ""
+    # Prefer `tool_args`, but also accept `context` for flexibility
+    marketing_context: Dict[str, Any] = (
+        payload.get("tool_args")
+        or payload.get("context")
+        or {}
     )
 
-    with mcp_client as client:
-        # Get MCP Tools
-        tools = client.list_tools_sync()
+    channel = marketing_context.get("channel")
+    product = marketing_context.get("product")
+    audience = marketing_context.get("audience")
+    objective = marketing_context.get("objective")
+    brand_voice = marketing_context.get("brand_voice", "professional, concise, and friendly")
+    extra = marketing_context.get("extra_requirements", "")
 
-        # Create agent
-        agent = Agent(
-            model=load_model(),
-             session_manager=session_manager,
-            system_prompt="""
-                You are a helpful assistant with code execution capabilities. Use tools when appropriate.
-            """,
-            tools=[code_interpreter.code_interpreter, add_numbers] + tools
-        )
+    # If structured marketing parameters are provided, build a focused prompt
+    if channel or product or audience or objective:
+        structured_prompt = f"""
+You are helping the marketing team craft channel-specific copy.
 
-        # Execute and format response
-        stream = agent.stream_async(payload.get("prompt"))
+Campaign inputs:
+- Channel: {channel or "unspecified"}
+- Product / offer: {product or "unspecified"}
+- Target audience: {audience or "unspecified"}
+- Objective: {objective or "unspecified"}
+- Brand voice: {brand_voice}
 
-        async for event in stream:
-            # Handle Text parts of the response
-            if "data" in event and isinstance(event["data"], str):
-                yield event["data"]
+Extra requirements: {extra or "None"}
 
-            # Implement additional handling for other events
-            # if "toolUse" in event:
-            #   # Process toolUse
+Please:
+1. Generate 2–3 alternative versions of copy optimized for this channel.
+2. For each version, include:
+   - A short title / hook.
+   - Main body copy.
+   - 1–2 clear calls-to-action (CTAs).
+3. Keep the output in well-structured Markdown with headings, bullet points, and clear separation between variants.
 
-            # Handle end of stream
-            # if "result" in event:
-            #    yield(format_response(event["result"]))
+User’s free-form instructions or additional context:
+{user_prompt}
+"""
+        final_prompt = structured_prompt
+    else:
+        # No structured parameters: let the agent decide the best way to help,
+        # but still treat this as a marketing-oriented question.
+        final_prompt = f"""
+The user is asking for help related to marketing.
 
-def format_response(result) -> str:
-    """Extract code from metrics and format with LLM response."""
-    parts = []
+First:
+- Identify whether this is primarily about copywriting, campaign idea brainstorming,
+  performance analysis, or something else.
+- If the request is ambiguous, ask exactly one clarifying question.
 
-    # Extract executed code from metrics
-    try:
-        tool_metrics = result.metrics.tool_metrics.get('code_interpreter')
-        if tool_metrics and hasattr(tool_metrics, 'tool'):
-            action = tool_metrics.tool['input']['code_interpreter_input']['action']
-            if 'code' in action:
-                parts.append(f"## Executed Code:\n```{action.get('language', 'python')}\n{action['code']}\n```\n---\n")
-    except (AttributeError, KeyError):
-        pass  # No code to extract
+Then:
+- Provide a helpful, marketing-focused answer or content.
 
-    # Add LLM response
-    parts.append(f"## 📊 Result:\n{str(result)}")
-    return "\n".join(parts)
+User message:
+{user_prompt}
+"""
+
+    result = agent(final_prompt)
+
+    return {
+        "result": result.message,
+    }
+
 
 if __name__ == "__main__":
+    # Optional local run; for development we mainly use `agentcore dev`.
     app.run()
