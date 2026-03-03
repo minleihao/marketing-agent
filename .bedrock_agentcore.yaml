@@ -11,14 +11,14 @@ agents:
     container_runtime: null
     source_path: /Users/minleihao/marketing-agent/novaRed/src
     aws:
-      execution_role: null
-      execution_role_auto_create: true
-      account: null
-      region: null
+      execution_role: arn:aws:iam::631195140215:role/AmazonBedrockAgentCoreSDKRuntime-us-east-2-ddab61bbbb
+      execution_role_auto_create: false
+      account: '631195140215'
+      region: us-east-2
       ecr_repository: null
       ecr_auto_create: false
-      s3_path: null
-      s3_auto_create: true
+      s3_path: s3://bedrock-agentcore-codebuild-sources-631195140215-us-east-2
+      s3_auto_create: false
       network_configuration:
         network_mode: PUBLIC
         network_mode_config: null
@@ -30,17 +30,21 @@ agents:
         idle_runtime_session_timeout: null
         max_lifetime: null
     bedrock_agentcore:
-      agent_id: null
-      agent_arn: null
-      agent_session_id: null
+      agent_id: novaRed_Agent-h7dTUU4TPS
+      agent_arn: arn:aws:bedrock-agentcore:us-east-2:631195140215:runtime/novaRed_Agent-h7dTUU4TPS
+      agent_session_id: cc235771-28d2-4464-806e-2af18d701a70
     codebuild:
       project_name: null
       execution_role: null
       source_bucket: null
     memory:
       mode: STM_AND_LTM
-      memory_name: novaRed_Memory
+      memory_id: novaRed_Agent_mem-E8TSkH5WZP
+      memory_arn: arn:aws:bedrock-agentcore:us-east-2:631195140215:memory/novaRed_Agent_mem-E8TSkH5WZP
+      memory_name: novaRed_Agent_mem
       event_expiry_days: 30
+      first_invoke_memory_check_done: true
+      was_created_by_toolkit: true
     identity:
       credential_providers: []
       workload: null

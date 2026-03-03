@@ -17,7 +17,11 @@ from model.load import DEFAULT_MODEL_ID
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+DEFAULT_DATA_DIR = BASE_DIR / "data"
+if os.getenv("AWS_LAMBDA_FUNCTION_NAME") and not os.getenv("NOVARED_DATA_DIR"):
+    DATA_DIR = Path("/tmp/novaRed")
+else:
+    DATA_DIR = Path(os.getenv("NOVARED_DATA_DIR", str(DEFAULT_DATA_DIR)))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "webapp.db"
 SESSION_COOKIE = "nova_session"

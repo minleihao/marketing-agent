@@ -1,11 +1,20 @@
 import os
 from typing import Any, Dict
 
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from dotenv import load_dotenv
 from strands import Agent
 
 from model.load import DEFAULT_MODEL_ID, load_model
+
+try:
+    from bedrock_agentcore.runtime import BedrockAgentCoreApp
+except Exception:
+    class BedrockAgentCoreApp:
+        def entrypoint(self, func):
+            return func
+
+        def run(self):
+            raise RuntimeError("BedrockAgentCore runtime is not installed in this environment.")
 
 load_dotenv()
 
