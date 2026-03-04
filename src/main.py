@@ -221,6 +221,7 @@ def invoke(payload: Dict[str, Any]):
             "brand_voice",
             default=DEFAULT_BRAND_VOICE,
         )
+        ui_language = _ensure_string(marketing_context.get("ui_language"), "ui_language", default="").lower()
         extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
         model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
 
@@ -238,9 +239,19 @@ def invoke(payload: Dict[str, Any]):
         return _error_response("VALIDATION_ERROR", str(exc))
 
     try:
+        language_instruction = ""
+        if ui_language.startswith("en"):
+            language_instruction = (
+                "Language requirement:\n"
+                "- Respond strictly in English.\n"
+                "- Do not include Chinese text in the response.\n"
+            )
+
         if has_structured_context:
             structured_prompt = f"""
 You are helping the marketing team craft channel-specific copy.
+
+{language_instruction}
 
 Campaign inputs:
 - Channel: {channel or "unspecified"}
@@ -266,6 +277,8 @@ User’s free-form instructions or additional context:
         else:
             final_prompt = f"""
 The user is asking for help related to marketing.
+
+{language_instruction}
 
 First:
 - Identify whether this is primarily about copywriting, campaign idea brainstorming,

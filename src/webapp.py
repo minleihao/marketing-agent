@@ -58,6 +58,7 @@ SUPPORTED_MODELS = [
     "us.amazon.nova-micro-v1:0",
     "us.amazon.nova-lite-v1:0",
     "us.amazon.nova-pro-v1:0",
+    "us.anthropic.claude-sonnet-4-6",
 ]
 TASK_MODES = {"chat", "marketing"}
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".log", ".py", ".html", ".xml", ".yaml", ".yml"}
@@ -425,6 +426,7 @@ class ConversationCreateInput(BaseModel):
 
 class MessageInput(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    ui_language: str | None = None
     channel: str | None = None
     product: str | None = None
     audience: str | None = None
@@ -1787,7 +1789,7 @@ async function sendMessage() {
 
   try {
     const active = currentConversation();
-    const payload = { content };
+    const payload = { content, ui_language: currentLang };
     if (active && active.task_mode === 'marketing') {
       payload.channel = document.getElementById('brief-channel').value || null;
       payload.product = document.getElementById('brief-product').value.trim() || null;
@@ -3267,6 +3269,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "audience": body.audience,
         "objective": body.objective,
         "brand_voice": body.brand_voice,
+        "ui_language": body.ui_language,
         "model_id": conversation["model_id"],
     }
     extra_parts = []
@@ -3280,10 +3283,32 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         extra_parts.append(doc_context)
     context["extra_requirements"] = "\n\n".join(extra_parts) if extra_parts else None
 
+    model_fallback_used = False
+    original_model_id = conversation["model_id"]
     agent_output = invoke({"prompt": content, "tool_args": context})
-    if "error" in agent_output:
-        assistant_text = f"[错误] {agent_output['error'].get('message', 'unknown')}"
-    else:
+
+    if "error" in agent_output and original_model_id != DEFAULT_MODEL_ID:
+        fallback_context = dict(context)
+        fallback_context["model_id"] = DEFAULT_MODEL_ID
+        fallback_output = invoke({"prompt": content, "tool_args": fallback_context})
+        if "error" not in fallback_output:
+            model_fallback_used = True
+            agent_output = fallback_output
+            assistant_text = (
+                f"[系统提示] 模型 `{original_model_id}` 调用失败，已自动回退到 `{DEFAULT_MODEL_ID}`。\n\n"
+                f"{fallback_output.get('result', '')}"
+            )
+        else:
+            agent_output = fallback_output
+
+    if "error" in agent_output and not model_fallback_used:
+        error_block = agent_output.get("error", {}) or {}
+        message = error_block.get("message", "unknown")
+        details = error_block.get("details")
+        assistant_text = f"[错误] {message}"
+        if details:
+            assistant_text += f"\n{details}"
+    elif not model_fallback_used:
         assistant_text = agent_output.get("result", "")
 
     now2 = now_utc().isoformat()
@@ -3296,13 +3321,22 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         if conversation["title"] in {"新对话", "新营销任务"}:
             new_title = content[:30]
             conn.execute(
-                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-                (new_title, now2, conversation_id),
+                "UPDATE conversations SET title = ?, model_id = ?, updated_at = ? WHERE id = ?",
+                (
+                    new_title,
+                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    now2,
+                    conversation_id,
+                ),
             )
         else:
             conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (now2, conversation_id),
+                "UPDATE conversations SET model_id = ?, updated_at = ? WHERE id = ?",
+                (
+                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    now2,
+                    conversation_id,
+                ),
             )
 
     return {
