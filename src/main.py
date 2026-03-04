@@ -21,6 +21,9 @@ load_dotenv()
 
 
 DEFAULT_BRAND_VOICE = "professional, concise, and friendly"
+MODEL_ID_ALIASES = {
+    "anthropic.claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+}
 VALID_CHANNELS = {
     "email",
     "linkedin",
@@ -78,12 +81,17 @@ def _ensure_string(value: Any, field_name: str, default: str = "") -> str:
     return value.strip()
 
 
+def _normalize_model_id(model_id: str) -> str:
+    return MODEL_ID_ALIASES.get(model_id, model_id)
+
+
 def _is_allowed_model_id(model_id: str) -> bool:
+    normalized = _normalize_model_id(model_id)
     allowed = os.getenv("NOVARED_ALLOWED_MODELS")
     if not allowed:
         return True
-    allowed_set = {x.strip() for x in allowed.split(",") if x.strip()}
-    return model_id in allowed_set
+    allowed_set = {_normalize_model_id(x.strip()) for x in allowed.split(",") if x.strip()}
+    return normalized in allowed_set
 
 
 def _is_credentials_error(exc: Exception) -> bool:
@@ -210,6 +218,7 @@ def invoke(payload: Dict[str, Any]):
         ui_language = _ensure_string(marketing_context.get("ui_language"), "ui_language", default="").lower()
         extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
         model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
+        model_id = _normalize_model_id(model_id)
 
         if channel and channel.lower() not in VALID_CHANNELS:
             valid = ", ".join(sorted(VALID_CHANNELS))
