@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>KB Management</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f8fb; color: #1f2937; }
+    .wrap { max-width: 980px; margin: 24px auto; background: #fff; border: 1px solid #dde3ee; border-radius: 12px; padding: 16px; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+    .full { grid-column: 1 / -1; }
+    input, textarea, button { width: 100%; box-sizing: border-box; padding: 9px; border-radius: 8px; border: 1px solid #cfd7e6; }
+    textarea { min-height: 100px; }
+    button { background: #0f6fff; color: white; border: 0; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #f5f7fb; border: 1px solid #d7dfea; padding: 10px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Brand KB Management</h1>
+    <a href="/">Back to chat</a>
+
+    <div class="grid">
+      <input id="kb-id" placeholder="KB ID (e.g. brand_main)" />
+      <input id="kb-name" placeholder="Brand Name" />
+      <textarea id="brand-voice" class="full" placeholder="Brand Voice"></textarea>
+      <textarea id="positioning" class="full" placeholder='Positioning JSON, e.g. {"category":"B2B SaaS"}'></textarea>
+      <textarea id="glossary" class="full" placeholder='Glossary JSON list, e.g. [{"avoid":"cheap","preferred":"cost-effective"}]'></textarea>
+      <textarea id="forbidden" class="full" placeholder='Forbidden words JSON list, e.g. ["best ever", "guaranteed"]'></textarea>
+      <textarea id="claims" class="full" placeholder='Claims policy JSON, e.g. {"strict":true,"require_source":true}'></textarea>
+      <textarea id="notes" class="full" placeholder="Notes"></textarea>
+      <button id="save">Save New</button>
+      <button id="update">Update Existing</button>
+    </div>
+
+    <h3>Result</h3>
+    <pre id="kb-result"></pre>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

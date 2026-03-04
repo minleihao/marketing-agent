@@ -39,20 +39,24 @@ After providing credentials, `agentcore deploy` will deploy your project into Am
 
 Use `agentcore invoke` to invoke your deployed agent.
 
-# Web Frontend (Multi-user Chat)
+# Unified Web App
 
-This repo now includes a web app at `src/webapp.py` with:
-- User registration and login
-- Per-user chat history isolation
-- GPT-style UI (`left`: conversation list/new conversation, `right`: active chat)
-- Admin user management (create user, enable/disable user, reset password)
+This project is unified under one web app entrypoint with:
+- User registration/login
+- User management
+- Multi-conversation chat UI
+- Task mode per conversation (`chat` / `marketing`)
+- Marketing brief template inputs (`Prompt`, `Channel`, `Product`, `Audience`, `Objective`, `Extra Requirements`, `Brand KB Selector`)
+- Model selection
+- Document upload
+- Shared multi-version Brand KB with dedicated KB management page (`/kb`) for create/update/delete
 
-## Run the web app
+## Run locally
 
-1. Install dependencies (if needed):
+1. Install dependencies:
    - `uv sync`
 2. Start server:
-   - `uv run uvicorn webapp:app --app-dir src --reload --port 8000`
+   - `uv run python main.py`
 3. Open:
    - `http://127.0.0.1:8000`
 

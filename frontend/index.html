@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Marketing Agent</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f8fb; color: #1f2937; }
+    .wrap { max-width: 980px; margin: 24px auto; background: #fff; border: 1px solid #dde3ee; border-radius: 12px; padding: 16px; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+    .full { grid-column: 1 / -1; }
+    input, select, textarea, button { width: 100%; box-sizing: border-box; padding: 9px; border-radius: 8px; border: 1px solid #cfd7e6; }
+    textarea { min-height: 130px; }
+    button { background: #0f6fff; color: white; border: 0; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #f5f7fb; border: 1px solid #d7dfea; padding: 10px; border-radius: 8px; }
+    .row { display:flex; gap:10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row">
+      <h1 style="flex:1">Marketing Agent</h1>
+      <a href="/kb" style="align-self:center">Manage Brand KB</a>
+    </div>
+
+    <div class="grid">
+      <textarea id="prompt" class="full" placeholder="Enter marketing request..."></textarea>
+      <select id="channel">
+        <option value="email">email</option>
+        <option value="linkedin">linkedin</option>
+        <option value="x">x</option>
+        <option value="landing_page">landing_page</option>
+      </select>
+      <input id="audience" placeholder="Audience" />
+      <input id="product" placeholder="Product" />
+      <input id="objective" placeholder="Objective" />
+      <select id="kb_id" class="full"></select>
+      <button id="generate" class="full">Generate</button>
+    </div>
+
+    <h3>Output</h3>
+    <pre id="output"></pre>
+    <h3>Violations</h3>
+    <pre id="violations"></pre>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
