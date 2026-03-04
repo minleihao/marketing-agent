@@ -190,7 +190,7 @@ def init_db() -> None:
             )
 
 
-app = FastAPI(title="novaRed Web Chat")
+app = FastAPI(title="Marketing Copilot Web Chat")
 
 
 @app.on_event("startup")
@@ -483,22 +483,25 @@ AUTH_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>novaRed</title>
+  <title>Marketing Copilot</title>
   <style>
-    :root { --bg:#f5f7fb; --card:#ffffff; --line:#d9deea; --txt:#1b2430; --muted:#5a6472; --accent:#1f6feb; }
+    @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@500&display=swap');
+    :root { --bg:#ecf3ff; --card:#ffffff; --line:#d9deea; --txt:#101828; --muted:#5a6472; --accent:#1565d8; --accent-2:#11a089; }
     * { box-sizing:border-box; }
-    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:linear-gradient(160deg,#eef3ff,#f9fafc 45%,#ecf7f3); color:var(--txt); min-height:100vh; display:grid; place-items:center; }
+    body { margin:0; font-family:"Manrope","Segoe UI",sans-serif; background:radial-gradient(1200px 540px at 10% -10%,#d7e8ff 0%,transparent 56%),radial-gradient(980px 520px at 92% 0%,#d6f3e9 0%,transparent 58%),linear-gradient(160deg,#eef4ff,#f8fbff 45%,#edf8f3); color:var(--txt); min-height:100vh; display:grid; place-items:center; }
     .lang { position:fixed; top:14px; right:14px; display:flex; gap:6px; }
-    .lang button { width:auto; padding:7px 10px; border:1px solid var(--line); background:#fff; color:var(--txt); }
+    .lang button { width:auto; padding:7px 10px; border:1px solid var(--line); background:#fff; color:var(--txt); border-radius:999px; transition:.2s ease; }
     .lang button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .wrap { width:min(900px,94vw); display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 12px 40px rgba(22,34,66,.06); }
-    h2 { margin:0 0 10px; }
+    .wrap { width:min(940px,94vw); display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .card { background:linear-gradient(180deg,#ffffff,#fdfefe); border:1px solid var(--line); border-radius:16px; padding:22px; box-shadow:0 20px 45px rgba(18,30,58,.10); backdrop-filter: blur(2px); }
+    h2 { margin:0 0 10px; font-weight:800; letter-spacing:.1px; }
     p { color:var(--muted); margin:0 0 16px; font-size:14px; }
-    input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:10px; }
-    button { width:100%; border:0; border-radius:10px; padding:10px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+    input { width:100%; padding:11px; border:1px solid var(--line); border-radius:12px; margin-bottom:10px; transition:.2s ease; background:#fff; }
+    input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(21,101,216,.15); }
+    button { width:100%; border:0; border-radius:12px; padding:11px; background:linear-gradient(120deg,var(--accent),#0f8ad7); color:#fff; font-weight:700; cursor:pointer; transition:.2s ease; }
+    button:hover { transform:translateY(-1px); box-shadow:0 10px 22px rgba(21,101,216,.28); }
     .err { color:#d1242f; font-size:13px; min-height:20px; }
-    .note { margin-top:8px; font-size:12px; color:var(--muted); }
+    .note { margin-top:8px; font-size:12px; color:var(--muted); font-family:"IBM Plex Mono",ui-monospace,monospace; }
     @media (max-width: 760px) { .wrap { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -530,9 +533,9 @@ AUTH_HTML = """
 <script>
 const I18N = {
   zh: {
-    page_title: 'novaRed 登录',
+    page_title: 'Marketing Copilot 登录',
     login_title: '登录',
-    login_subtitle: '进入你的营销 Agent 工作台。',
+    login_subtitle: '进入你的 Marketing Copilot 工作台。',
     login_btn: '登录',
     register_title: '注册',
     register_subtitle: '创建个人账号后可保存自己的对话记录。',
@@ -546,7 +549,7 @@ const I18N = {
     register_failed: '注册失败'
   },
   en: {
-    page_title: 'novaRed Sign In',
+    page_title: 'Marketing Copilot Sign In',
     login_title: 'Sign In',
     login_subtitle: 'Access your marketing agent workspace.',
     login_btn: 'Sign In',
@@ -618,101 +621,379 @@ APP_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>novaRed Chat</title>
+  <title>Marketing Copilot</title>
   <style>
-    :root { --bg:#f4f6fb; --pane:#ffffff; --line:#d8deea; --txt:#1b2430; --muted:#5f6b7a; --accent:#0f6fff; --bot:#f2f6ff; --user:#e8f6ef; }
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
+    :root {
+      --bg:#edf4ff;
+      --bg-soft:#f4fbf7;
+      --pane:rgba(255,255,255,.86);
+      --pane-solid:#ffffff;
+      --line:#d6dfec;
+      --line-strong:#bfcee3;
+      --txt:#0f1b2d;
+      --muted:#53647c;
+      --accent:#0a67d3;
+      --accent-2:#0ea979;
+      --danger:#cf3f3f;
+      --bot:#f4f8ff;
+      --user:#e9f8ef;
+      --shadow:0 18px 36px rgba(16,32,62,.12);
+    }
     * { box-sizing:border-box; }
-    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--txt); }
-    .root { height:100vh; display:grid; grid-template-columns:280px 1fr; }
-    .sidebar { border-right:1px solid var(--line); background:linear-gradient(180deg,#f6f9ff,#fdfefe); padding:14px; display:flex; flex-direction:column; }
-    .topline { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; }
-    .badge { font-size:12px; color:var(--muted); }
-    .btn { border:1px solid var(--line); background:#fff; padding:8px 10px; border-radius:10px; cursor:pointer; }
-    .btn.accent { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .chat-list { overflow:auto; display:flex; flex-direction:column; gap:8px; margin-top:10px; }
-    .chat-item { border:1px solid var(--line); border-radius:10px; padding:10px; background:#fff; cursor:pointer; }
-    .chat-item.active { border-color:var(--accent); box-shadow:0 0 0 2px rgba(15,111,255,.15); }
+    body {
+      margin:0;
+      font-family:"IBM Plex Sans","Segoe UI",sans-serif;
+      background:
+        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
+        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
+        linear-gradient(160deg,var(--bg),var(--bg-soft));
+      color:var(--txt);
+      height:100vh;
+      overflow:hidden;
+    }
+    .app-shell {
+      height:100vh;
+      display:grid;
+      grid-template-rows:auto 1fr;
+      gap:8px;
+      padding:8px;
+      min-height:0;
+    }
+    .global-bar {
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.86);
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(10px);
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      padding:6px 10px;
+    }
+    .global-title {
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:15px;
+      font-weight:700;
+      letter-spacing:.2px;
+    }
+    .global-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+    .root {
+      min-height:0;
+      height:100%;
+      display:grid;
+      grid-template-columns:minmax(300px,340px) 1fr;
+      gap:10px;
+      min-width:0;
+    }
+    .sidebar {
+      border:1px solid var(--line);
+      background:var(--pane);
+      border-radius:24px;
+      padding:12px;
+      display:flex;
+      flex-direction:column;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(10px);
+      overflow:hidden;
+      min-height:0;
+    }
+    .topline { display:block; margin-bottom:8px; }
+    .topline strong { font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; letter-spacing:.1px; display:block; margin-bottom:6px; }
+    .quick-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+    .badge {
+      font-size:12px;
+      color:var(--muted);
+      padding:7px 10px;
+      border:1px dashed var(--line-strong);
+      border-radius:12px;
+      margin-top:10px;
+      background:#f7fbff;
+    }
+    .btn {
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--txt);
+      padding:7px 9px;
+      border-radius:10px;
+      cursor:pointer;
+      font-weight:600;
+      transition:.16s ease;
+    }
+    .btn:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 16px rgba(14,30,60,.08); }
+    .btn:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(10,103,211,.17); border-color:var(--accent); }
+    .btn.accent {
+      background:linear-gradient(120deg,var(--accent),#0987cf);
+      color:#fff;
+      border-color:transparent;
+    }
+    .chat-list {
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      margin-top:8px;
+      padding-right:2px;
+      min-height:0;
+      flex:1 1 auto;
+    }
+    .chat-item {
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:8px;
+      background:linear-gradient(180deg,#fff,#fdfefe);
+      cursor:pointer;
+      transition:.16s ease;
+    }
+    .chat-item:hover { border-color:var(--line-strong); transform:translateY(-1px); }
+    .chat-item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
     .chat-row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-    .chat-title { font-size:14px; font-weight:600; }
-    .chat-title-input { width:100%; font-size:14px; font-weight:600; border:1px solid var(--accent); border-radius:6px; padding:3px 6px; background:#fff; }
-    .mode-pill { font-size:11px; border:1px solid #bfd3ff; color:#1657c9; background:#eef4ff; border-radius:999px; padding:2px 8px; white-space:nowrap; }
+    .chat-title { font-size:14px; font-weight:700; line-height:1.35; }
+    .chat-title-input {
+      width:100%;
+      font-size:14px;
+      font-weight:700;
+      border:1px solid var(--accent);
+      border-radius:8px;
+      padding:5px 8px;
+      background:#fff;
+    }
+    .mode-pill {
+      font-size:11px;
+      border:1px solid #b8d8ce;
+      color:#0a7f5e;
+      background:#ebfaf4;
+      border-radius:999px;
+      padding:2px 8px;
+      white-space:nowrap;
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      text-transform:uppercase;
+      letter-spacing:.2px;
+    }
     .chat-time { font-size:12px; color:var(--muted); margin-top:4px; }
-    .lang { display:flex; gap:6px; }
-    .lang .btn { padding:6px 9px; }
-    .lang .btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .lang { display:flex; gap:6px; padding:4px; border:1px solid var(--line); border-radius:999px; width:max-content; background:#fff; }
+    .lang .btn { padding:6px 10px; border-radius:999px; border:0; box-shadow:none; }
+    .lang .btn:hover { transform:none; box-shadow:none; background:#f2f6fb; }
+    .lang .btn.active { background:var(--accent); color:#fff; }
 
-    .main { display:grid; grid-template-rows:auto 1fr auto; }
-    .head { border-bottom:1px solid var(--line); background:#fff; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
-    .head-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+    .main {
+      display:grid;
+      grid-template-rows:auto 1fr auto;
+      border:1px solid var(--line);
+      border-radius:24px;
+      background:var(--pane);
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(10px);
+      overflow:hidden;
+      min-height:0;
+      min-width:0;
+    }
+    .head {
+      border-bottom:1px solid var(--line);
+      background:rgba(255,255,255,.86);
+      padding:8px 12px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+    }
+    .head strong {
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:17px;
+      max-width:44%;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    .head-controls { display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
     .head-controls label { font-size:12px; color:var(--muted); }
-    .head-controls select { border:1px solid var(--line); border-radius:10px; padding:7px; background:#fff; }
-    .messages { padding:18px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
-    .msg { max-width:840px; border:1px solid var(--line); border-radius:12px; padding:12px; line-height:1.5; white-space:pre-wrap; }
-    .msg.user { background:var(--user); align-self:flex-end; }
-    .msg.assistant { background:var(--bot); align-self:flex-start; }
-    .composer { border-top:1px solid var(--line); background:#fff; padding:12px; }
-    textarea { width:100%; min-height:90px; resize:vertical; border:1px solid var(--line); border-radius:10px; padding:10px; }
-    .brief-card { border:1px solid var(--line); background:#f9fbff; border-radius:10px; padding:10px; margin-bottom:8px; }
+    .head-controls select {
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:6px 8px;
+      background:#fff;
+      min-width:120px;
+      color:var(--txt);
+    }
+    .messages {
+      padding:12px;
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      min-height:0;
+      background:
+        radial-gradient(420px 180px at 2% 4%,rgba(10,103,211,.06),transparent 80%),
+        radial-gradient(320px 160px at 98% 95%,rgba(14,169,121,.08),transparent 78%);
+    }
+    .msg {
+      max-width:min(860px,84%);
+      border:1px solid var(--line);
+      border-radius:16px;
+      padding:10px 12px;
+      line-height:1.58;
+      white-space:pre-wrap;
+      box-shadow:0 10px 20px rgba(12,26,48,.06);
+      animation:riseIn .2s ease;
+    }
+    .msg.user { background:var(--user); align-self:flex-end; border-color:#bfe6cf; }
+    .msg.assistant { background:var(--bot); align-self:flex-start; border-color:#c9daf3; }
+    .composer {
+      border-top:1px solid var(--line);
+      background:rgba(255,255,255,.92);
+      padding:8px 10px;
+      max-height:34vh;
+      overflow:auto;
+    }
+    textarea, input, select {
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:8px 10px;
+      background:#fff;
+      color:var(--txt);
+      font-family:inherit;
+      transition:.16s ease;
+    }
+    textarea:focus, input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); }
+    textarea { min-height:70px; resize:vertical; }
+    .brief-card {
+      border:1px solid var(--line);
+      background:linear-gradient(180deg,#fafdff,#f8fdfb);
+      border-radius:12px;
+      padding:8px;
+      margin-bottom:6px;
+    }
     .brief-card.hidden { display:none; }
     .brief-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     .brief-grid .full { grid-column:1 / -1; }
     .brief-grid label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
-    .brief-grid input, .brief-grid select, .brief-grid textarea { width:100%; border:1px solid var(--line); border-radius:8px; padding:8px; background:#fff; }
-    .brief-grid textarea { min-height:72px; }
-    .action { margin-top:8px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
-    .upload { margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .brief-grid textarea { min-height:58px; }
+    .action { margin-top:6px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .upload { margin-top:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .upload label { font-size:12px; color:var(--muted); }
+    input[type="file"] {
+      width:auto;
+      max-width:340px;
+      font-size:12px;
+      padding:7px;
+      border-radius:10px;
+      background:#fff;
+    }
     .doc-list { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
-    .doc-pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid var(--line); border-radius:999px; padding:4px 10px; background:#fff; }
-    .doc-pill button { border:0; background:transparent; cursor:pointer; color:#b42318; font-size:12px; padding:0; }
+    .doc-pill {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      font-size:12px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding:4px 9px;
+      background:#fff;
+      box-shadow:0 6px 14px rgba(13,27,48,.05);
+    }
+    .doc-pill button {
+      border:0;
+      background:transparent;
+      cursor:pointer;
+      color:var(--danger);
+      font-size:12px;
+      padding:0;
+      font-weight:700;
+    }
     .hint { font-size:12px; color:var(--muted); }
+    .empty-state {
+      border:1px dashed var(--line-strong);
+      border-radius:14px;
+      padding:14px;
+      color:var(--muted);
+      background:rgba(255,255,255,.66);
+      text-align:center;
+      font-size:13px;
+    }
+    .kbd-hint { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10px; color:var(--muted); margin-top:4px; }
+    @keyframes riseIn {
+      from { opacity:.2; transform:translateY(3px); }
+      to { opacity:1; transform:none; }
+    }
+    *::-webkit-scrollbar { width:10px; height:10px; }
+    *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
+    *::-webkit-scrollbar-track { background:transparent; }
 
+    @media (max-width: 1200px) {
+      .root { grid-template-columns:300px 1fr; }
+      .head strong { max-width:100%; font-size:18px; }
+      .head { flex-direction:column; align-items:flex-start; }
+      .head-controls { justify-content:flex-start; }
+    }
     @media (max-width: 900px) {
-      .root { grid-template-columns:1fr; }
-      .sidebar { height:35vh; border-right:0; border-bottom:1px solid var(--line); }
+      body { background:linear-gradient(160deg,var(--bg),var(--bg-soft)); }
+      .app-shell { padding:6px; gap:6px; }
+      .global-bar { border-radius:12px; padding:7px; }
+      .global-title { font-size:14px; }
+      .root { grid-template-columns:1fr; gap:8px; }
+      .sidebar, .main { border-radius:16px; }
+      .sidebar { height:36vh; border-right:1px solid var(--line); }
+      .global-actions { width:100%; justify-content:flex-start; }
+      .quick-actions { grid-template-columns:1fr; }
+      .msg { max-width:96%; }
+      .brief-grid { grid-template-columns:1fr; }
+      .action { flex-direction:column; align-items:stretch; }
+      .action .btn { width:100%; }
+      input[type="file"] { width:100%; max-width:none; }
+      .composer { max-height:40vh; }
     }
   </style>
 </head>
 <body>
-  <div class="root">
-    <aside class="sidebar">
-      <div class="topline">
-        <strong data-i18n="conversation_list">会话记录</strong>
-        <div style="display:flex; gap:6px;">
-          <button class="btn accent" onclick="createConversation('chat')" data-i18n="new_chat_conversation">+ 新对话</button>
-          <button class="btn" onclick="createConversation('marketing')" data-i18n="new_marketing_conversation">+ 营销任务</button>
+  <div class="app-shell">
+    <div class="global-bar">
+      <div class="global-title" data-i18n="app_brand">Marketing Copilot</div>
+      <div class="global-actions">
+        <div class="lang">
+          <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
+          <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
         </div>
+        <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
+        <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
+        <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
       </div>
-      <div class="lang">
-        <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
-        <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
-      </div>
-      <div class="badge" id="user-badge"></div>
-      <div class="chat-list" id="chat-list"></div>
-    </aside>
+    </div>
 
-    <section class="main">
-      <div class="head">
-        <strong id="chat-title" data-i18n="no_conversation">未选择会话</strong>
-        <div class="head-controls">
-          <label for="model-select" data-i18n="model_label">模型</label>
-          <select id="model-select" onchange="changeModel()"></select>
-          <label for="task-mode-select" data-i18n="mode_label">任务模式</label>
-          <select id="task-mode-select" onchange="changeTaskMode()">
-            <option value="chat" data-i18n="mode_chat">普通聊天</option>
-            <option value="marketing" data-i18n="mode_marketing">营销任务</option>
-          </select>
-          <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
-          <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
-          <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
-          <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
-          <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
-          <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
+    <div class="root">
+      <aside class="sidebar">
+        <div class="topline">
+          <strong data-i18n="conversation_list">会话记录</strong>
+          <div class="quick-actions">
+            <button class="btn accent" onclick="createConversation('chat')" data-i18n="new_chat_conversation">+ 新对话</button>
+            <button class="btn" onclick="createConversation('marketing')" data-i18n="new_marketing_conversation">+ 营销任务</button>
+          </div>
         </div>
-      </div>
+        <div class="badge" id="user-badge"></div>
+        <div class="chat-list" id="chat-list"></div>
+      </aside>
 
-      <div class="messages" id="messages"></div>
+      <section class="main">
+        <div class="head">
+          <strong id="chat-title" data-i18n="no_conversation">未选择会话</strong>
+          <div class="head-controls">
+            <label for="model-select" data-i18n="model_label">模型</label>
+            <select id="model-select" onchange="changeModel()"></select>
+            <label for="task-mode-select" data-i18n="mode_label">任务模式</label>
+            <select id="task-mode-select" onchange="changeTaskMode()">
+              <option value="chat" data-i18n="mode_chat">普通聊天</option>
+              <option value="marketing" data-i18n="mode_marketing">营销任务</option>
+            </select>
+            <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
+            <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
+            <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
+          </div>
+        </div>
 
-      <div class="composer">
+        <div class="messages" id="messages"></div>
+
+        <div class="composer">
         <div class="brief-card hidden" id="marketing-brief">
           <div class="brief-grid">
             <div>
@@ -755,24 +1036,27 @@ APP_HTML = """
         </div>
         <label for="input" data-i18n="brief_prompt" style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px;">Prompt</label>
         <textarea id="input" data-i18n-placeholder="input_placeholder" placeholder="输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案"></textarea>
+        <div class="kbd-hint">Ctrl/Cmd + Enter</div>
         <div class="upload">
           <label for="doc-file" data-i18n="upload_label">上传文档</label>
           <input id="doc-file" type="file" />
           <button class="btn" onclick="uploadDocument()" data-i18n="upload_btn">上传</button>
         </div>
         <div class="doc-list" id="doc-list"></div>
-        <div class="action">
-          <span class="hint" data-i18n="hint">每个用户仅能访问自己的会话和消息。</span>
-          <button class="btn accent" onclick="sendMessage()" data-i18n="send">发送</button>
+          <div class="action">
+            <span class="hint" data-i18n="hint">每个用户仅能访问自己的会话和消息。</span>
+            <button class="btn accent" onclick="sendMessage()" data-i18n="send">发送</button>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   </div>
 
 <script>
 const I18N = {
   zh: {
-    page_title: 'novaRed Chat',
+    page_title: 'Marketing Copilot',
+    app_brand: 'Marketing Copilot',
     conversation_list: '会话记录',
     new_conversation: '+ 新对话',
     new_chat_conversation: '+ 新对话',
@@ -800,6 +1084,7 @@ const I18N = {
     upload_label: '上传文档',
     upload_btn: '上传',
     input_placeholder: '输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案',
+    chat_input_placeholder: '输入任意消息进行普通聊天',
     hint: '每个用户仅能访问自己的会话和消息。',
     send: '发送',
     current_user: '当前用户',
@@ -824,10 +1109,14 @@ const I18N = {
     kb_create_success: 'KB 版本已创建:',
     kb_create_failed: '创建 KB 失败',
     export_failed: '导出失败',
-    rename_failed: '重命名失败'
+    rename_failed: '重命名失败',
+    conversations_empty: '还没有会话，点击上方按钮开始。',
+    messages_empty: '从这里开始和 Agent 对话。',
+    documents_empty: '暂无上传文档。'
   },
   en: {
-    page_title: 'novaRed Chat',
+    page_title: 'Marketing Copilot',
+    app_brand: 'Marketing Copilot',
     conversation_list: 'Conversations',
     new_conversation: '+ New Chat',
     new_chat_conversation: '+ Chat',
@@ -855,6 +1144,7 @@ const I18N = {
     upload_label: 'Upload document',
     upload_btn: 'Upload',
     input_placeholder: 'Type your marketing task, e.g., write 3 LinkedIn hooks for a B2B SaaS launch',
+    chat_input_placeholder: 'Type a free-form message to chat with the agent',
     hint: 'Each user can only access their own conversations and messages.',
     send: 'Send',
     current_user: 'Current user',
@@ -879,7 +1169,10 @@ const I18N = {
     kb_create_success: 'KB version created:',
     kb_create_failed: 'Failed to create KB',
     export_failed: 'Export failed',
-    rename_failed: 'Rename failed'
+    rename_failed: 'Rename failed',
+    conversations_empty: 'No conversations yet. Start one from above.',
+    messages_empty: 'Start chatting with your agent here.',
+    documents_empty: 'No uploaded documents yet.'
   }
 };
 
@@ -923,6 +1216,12 @@ function applyI18n() {
   }
   renderKBKeySelect();
   renderKBVersionSelect();
+  renderConversations();
+  renderDocuments();
+  const emptyMsg = document.querySelector('#messages .empty-state');
+  if (emptyMsg && !document.querySelector('#messages .msg')) {
+    emptyMsg.textContent = t('messages_empty');
+  }
   syncTaskModeSelect();
   syncTaskModeUI();
 }
@@ -935,9 +1234,7 @@ function syncTaskModeUI() {
   brief.classList.toggle('hidden', !marketingMode);
   document.getElementById('input').placeholder = marketingMode
     ? t('input_placeholder')
-    : (currentLang === 'en'
-      ? 'Type a free-form message to chat with the agent'
-      : '输入任意消息进行普通聊天');
+    : t('chat_input_placeholder');
 }
 
 async function api(url, options={}) {
@@ -956,6 +1253,13 @@ function fmt(ts) {
 function renderDocuments() {
   const box = document.getElementById('doc-list');
   box.innerHTML = '';
+  if (!activeDocuments.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = t('documents_empty');
+    box.appendChild(empty);
+    return;
+  }
   for (const d of activeDocuments) {
     const item = document.createElement('div');
     item.className = 'doc-pill';
@@ -1207,6 +1511,13 @@ async function loadDocuments(conversationId) {
 function renderConversations() {
   const list = document.getElementById('chat-list');
   list.innerHTML = '';
+  if (!conversations.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = t('conversations_empty');
+    list.appendChild(empty);
+    return;
+  }
   for (const c of conversations) {
     const div = document.createElement('div');
     div.className = 'chat-item' + (c.id === activeConversationId ? ' active' : '');
@@ -1308,6 +1619,13 @@ async function submitInlineRename(conversationId, rawTitle) {
 function renderMessages(items) {
   const box = document.getElementById('messages');
   box.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = t('messages_empty');
+    box.appendChild(empty);
+    return;
+  }
   for (const m of items) {
     const div = document.createElement('div');
     div.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
@@ -1454,6 +1772,8 @@ async function sendMessage() {
   input.value = '';
 
   const box = document.getElementById('messages');
+  const empty = box.querySelector('.empty-state');
+  if (empty) empty.remove();
   const pendingUser = document.createElement('div');
   pendingUser.className = 'msg user';
   pendingUser.textContent = content;
@@ -1551,32 +1871,111 @@ KB_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Brand KB</title>
+  <title>Marketing Copilot - KB</title>
   <style>
-    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f5f8fc; color:#1f2937; }
-    .wrap { max-width:1100px; margin:18px auto; padding:0 14px; }
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
+    :root {
+      --bg:#eef4ff;
+      --line:#d6dfec;
+      --line-strong:#bfcee3;
+      --txt:#0f1b2d;
+      --muted:#55657d;
+      --accent:#0a67d3;
+      --danger:#c63939;
+      --ok:#0f766e;
+      --shadow:0 18px 36px rgba(16,32,62,.12);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family:"IBM Plex Sans","Segoe UI",sans-serif;
+      background:
+        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
+        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
+        linear-gradient(160deg,#edf4ff,#f5fbf6);
+      color:var(--txt);
+    }
+    .wrap { max-width:1220px; margin:16px auto; padding:0 14px; }
     .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
-    .toolbar { display:flex; gap:8px; align-items:center; }
-    .toolbar button.active { background:#0f6fff; color:#fff; border-color:#0f6fff; }
-    .layout { display:grid; grid-template-columns: 320px 1fr; gap:12px; }
-    .card { background:#fff; border:1px solid #d8deea; border-radius:12px; padding:12px; }
-    .list { display:flex; flex-direction:column; gap:8px; max-height:560px; overflow:auto; }
-    .item { border:1px solid #d8deea; border-radius:10px; padding:8px; cursor:pointer; }
-    .item.active { border-color:#0f6fff; box-shadow:0 0 0 2px rgba(15,111,255,.12); }
-    .item .name { font-weight:600; font-size:14px; }
-    .item .meta { color:#64748b; font-size:12px; margin-top:4px; }
-    .grid { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
+    .top h2 { font-family:"Sora","IBM Plex Sans",sans-serif; margin:0; }
+    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .toolbar button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .layout { display:grid; grid-template-columns: 330px 1fr; gap:12px; }
+    .card {
+      background:rgba(255,255,255,.88);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+    .card h3 { margin:0 0 10px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; }
+    .list { display:flex; flex-direction:column; gap:8px; max-height:620px; overflow:auto; padding-right:2px; }
+    .item {
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:9px;
+      cursor:pointer;
+      background:#fff;
+      transition:.16s ease;
+    }
+    .item:hover { transform:translateY(-1px); border-color:var(--line-strong); }
+    .item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
+    .item .name { font-weight:700; font-size:14px; }
+    .item .meta { color:var(--muted); font-size:12px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+    .grid { display:grid; gap:10px; grid-template-columns:1fr 1fr; }
     .full { grid-column:1 / -1; }
-    label { font-size:12px; color:#475569; display:block; margin-bottom:4px; }
-    input, select, textarea, button { width:100%; box-sizing:border-box; padding:8px; border-radius:8px; border:1px solid #d8deea; }
-    textarea { min-height:90px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-    button { cursor:pointer; background:#fff; }
-    button.primary { background:#0f6fff; border-color:#0f6fff; color:#fff; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; font-weight:600; }
+    input, select, textarea, button {
+      width:100%;
+      box-sizing:border-box;
+      padding:9px 10px;
+      border-radius:11px;
+      border:1px solid var(--line);
+      font-family:inherit;
+      transition:.16s ease;
+      color:var(--txt);
+      background:#fff;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline:none;
+      border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(10,103,211,.14);
+    }
+    textarea { min-height:96px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
+    button { cursor:pointer; font-weight:600; }
+    button:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 14px rgba(15,30,60,.07); }
+    button.primary { background:linear-gradient(120deg,var(--accent),#0987cf); border-color:transparent; color:#fff; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; }
     .actions button { width:auto; }
-    .msg { font-size:12px; margin-top:8px; color:#0f766e; min-height:18px; }
-    .warn { color:#b91c1c; }
-    @media (max-width: 960px) { .layout { grid-template-columns:1fr; } }
+    .msg {
+      font-size:12px;
+      margin-top:10px;
+      color:var(--ok);
+      min-height:20px;
+      border-radius:10px;
+      background:#f3fdf9;
+      border:1px solid #bde9d9;
+      padding:7px 10px;
+    }
+    .warn { color:var(--danger); background:#fff6f6; border-color:#f0c9c9; }
+    .empty {
+      border:1px dashed var(--line-strong);
+      border-radius:12px;
+      padding:13px;
+      text-align:center;
+      color:var(--muted);
+      background:rgba(255,255,255,.62);
+      font-size:13px;
+    }
+    *::-webkit-scrollbar { width:10px; height:10px; }
+    *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
+    *::-webkit-scrollbar-track { background:transparent; }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns:1fr; }
+      .toolbar { justify-content:flex-start; }
+      .actions button { width:100%; }
+    }
   </style>
 </head>
 <body>
@@ -1684,7 +2083,8 @@ const I18N = {
     delete_ok: '版本删除成功',
     delete_confirm: '确定删除该 KB 版本吗？',
     required_key: '请输入 KB Key',
-    invalid_json: 'JSON 格式错误'
+    invalid_json: 'JSON 格式错误',
+    kb_empty: '还没有 KB 版本，请先在右侧创建。'
   },
   en: {
     title: 'Brand KB Management',
@@ -1713,7 +2113,8 @@ const I18N = {
     delete_ok: 'Version deleted',
     delete_confirm: 'Delete this KB version?',
     required_key: 'KB key is required',
-    invalid_json: 'Invalid JSON'
+    invalid_json: 'Invalid JSON',
+    kb_empty: 'No KB versions yet. Create one from the form.'
   }
 };
 
@@ -1733,6 +2134,9 @@ function applyI18n() {
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
   document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+  renderKBList();
+  renderKBKeySelect();
+  renderVersionSelect();
 }
 function setLang(lang) {
   currentLang = lang === 'en' ? 'en' : 'zh';
@@ -1758,9 +2162,17 @@ function stringify(value) {
 function renderKBList() {
   const box = document.getElementById('kb-list');
   box.innerHTML = '';
+  if (!kbList.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = t('kb_empty');
+    box.appendChild(empty);
+    return;
+  }
+  const activeKey = document.getElementById('kb-key-select').value;
   for (const kb of kbList) {
     const div = document.createElement('div');
-    div.className = 'item';
+    div.className = 'item' + (activeKey === kb.kb_key ? ' active' : '');
     div.onclick = async () => {
       document.getElementById('kb-key-select').value = kb.kb_key;
       await changeKBKey();
@@ -1787,6 +2199,7 @@ function renderKBKeySelect() {
 }
 function renderVersionSelect() {
   const select = document.getElementById('kb-version-select-page');
+  const previous = select.value;
   select.innerHTML = '';
   if (!kbVersions.length) {
     const empty = document.createElement('option');
@@ -1800,6 +2213,9 @@ function renderVersionSelect() {
     option.value = String(item.version);
     option.textContent = `v${item.version}`;
     select.appendChild(option);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
   }
 }
 function fillForm(data) {
@@ -1834,6 +2250,7 @@ async function refreshKBList() {
 }
 async function changeKBKey() {
   const key = document.getElementById('kb-key-select').value;
+  renderKBList();
   if (!key) {
     kbVersions = [];
     renderVersionSelect();
@@ -1921,19 +2338,102 @@ ADMIN_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin</title>
+  <title>Marketing Copilot - Admin</title>
   <style>
-    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f6f8fc; color:#1f2a37; }
-    .wrap { max-width:980px; margin:20px auto; padding:0 14px; }
-    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
-    .toolbar { display:flex; gap:6px; align-items:center; }
-    .toolbar button.active { background:#0f6fff; color:#fff; border-color:#0f6fff; }
-    .card { background:#fff; border:1px solid #d8deea; border-radius:12px; padding:14px; margin-bottom:14px; }
-    input, select { padding:8px; border:1px solid #d8deea; border-radius:8px; margin-right:6px; }
-    button { padding:8px 10px; border:1px solid #d8deea; border-radius:8px; background:#fff; cursor:pointer; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { padding:8px; border-bottom:1px solid #edf1f7; text-align:left; }
-    .small { font-size:12px; color:#64748b; }
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+    :root {
+      --bg:#eef4ff;
+      --line:#d6dfec;
+      --line-strong:#bfcee3;
+      --txt:#0f1b2d;
+      --muted:#55657d;
+      --accent:#0a67d3;
+      --ok:#0f766e;
+      --shadow:0 18px 36px rgba(16,32,62,.12);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family:"IBM Plex Sans","Segoe UI",sans-serif;
+      background:
+        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
+        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
+        linear-gradient(160deg,#edf4ff,#f5fbf6);
+      color:var(--txt);
+    }
+    .wrap { max-width:1180px; margin:18px auto; padding:0 14px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; gap:8px; }
+    .top h2 { margin:0; font-family:"Sora","IBM Plex Sans",sans-serif; }
+    .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    .toolbar button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .card {
+      background:rgba(255,255,255,.88);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      margin-bottom:14px;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+    .card h3 { margin:0 0 10px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; }
+    .create-form {
+      display:grid;
+      grid-template-columns:minmax(180px,1fr) minmax(220px,1fr) minmax(150px,170px) auto;
+      gap:8px;
+      align-items:center;
+    }
+    input, select, button {
+      padding:9px 10px;
+      border:1px solid var(--line);
+      border-radius:11px;
+      background:#fff;
+      color:var(--txt);
+      font-family:inherit;
+      transition:.16s ease;
+    }
+    input:focus, select:focus {
+      outline:none;
+      border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(10,103,211,.14);
+    }
+    button {
+      cursor:pointer;
+      font-weight:600;
+      white-space:nowrap;
+    }
+    button:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 14px rgba(15,30,60,.07); }
+    .table-wrap { overflow:auto; border-radius:12px; }
+    table { width:100%; min-width:760px; border-collapse:separate; border-spacing:0; overflow:hidden; border-radius:12px; border:1px solid var(--line); }
+    thead th {
+      background:#f7fbff;
+      color:#38465a;
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.2px;
+    }
+    th, td { padding:10px; border-bottom:1px solid #edf1f7; text-align:left; font-size:13px; }
+    tbody tr:last-child td { border-bottom:0; }
+    tbody tr:hover td { background:#fcfeff; }
+    td button { margin-right:6px; font-size:12px; padding:7px 9px; }
+    .small {
+      font-size:12px;
+      color:var(--ok);
+      margin-top:8px;
+      min-height:18px;
+      background:#f3fdf9;
+      border:1px solid #bde9d9;
+      border-radius:10px;
+      padding:6px 10px;
+      width:max-content;
+      max-width:100%;
+    }
+    *::-webkit-scrollbar { width:10px; height:10px; }
+    *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
+    *::-webkit-scrollbar-track { background:transparent; }
+    @media (max-width: 980px) {
+      .create-form { grid-template-columns:1fr; }
+      .small { width:100%; }
+    }
   </style>
 </head>
 <body>
@@ -1950,31 +2450,35 @@ ADMIN_HTML = """
 
     <div class="card">
       <h3 data-i18n="create_user">创建用户</h3>
-      <input id="new-name" data-i18n-placeholder="username" placeholder="用户名" />
-      <input id="new-pass" data-i18n-placeholder="password" placeholder="密码" type="password" />
-      <select id="new-admin">
-        <option value="false" data-i18n="normal_user">普通用户</option>
-        <option value="true" data-i18n="admin_user">管理员</option>
-      </select>
-      <button onclick="createUser()" data-i18n="create">创建</button>
+      <div class="create-form">
+        <input id="new-name" data-i18n-placeholder="username" placeholder="用户名" />
+        <input id="new-pass" data-i18n-placeholder="password" placeholder="密码" type="password" />
+        <select id="new-admin">
+          <option value="false" data-i18n="normal_user">普通用户</option>
+          <option value="true" data-i18n="admin_user">管理员</option>
+        </select>
+        <button onclick="createUser()" data-i18n="create">创建</button>
+      </div>
       <div class="small" id="create-msg"></div>
     </div>
 
     <div class="card">
       <h3 data-i18n="user_list">用户列表</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th data-i18n="th_username">用户名</th>
-            <th data-i18n="th_role">角色</th>
-            <th data-i18n="th_status">状态</th>
-            <th data-i18n="th_created_at">创建时间</th>
-            <th data-i18n="th_action">操作</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th data-i18n="th_username">用户名</th>
+              <th data-i18n="th_role">角色</th>
+              <th data-i18n="th_status">状态</th>
+              <th data-i18n="th_created_at">创建时间</th>
+              <th data-i18n="th_action">操作</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
