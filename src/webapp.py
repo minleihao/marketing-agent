@@ -634,6 +634,7 @@ APP_HTML = """
     .chat-item.active { border-color:var(--accent); box-shadow:0 0 0 2px rgba(15,111,255,.15); }
     .chat-row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
     .chat-title { font-size:14px; font-weight:600; }
+    .chat-title-input { width:100%; font-size:14px; font-weight:600; border:1px solid var(--accent); border-radius:6px; padding:3px 6px; background:#fff; }
     .mode-pill { font-size:11px; border:1px solid #bfd3ff; color:#1657c9; background:#eef4ff; border-radius:999px; padding:2px 8px; white-space:nowrap; }
     .chat-time { font-size:12px; color:var(--muted); margin-top:4px; }
     .lang { display:flex; gap:6px; }
@@ -702,6 +703,7 @@ APP_HTML = """
           </select>
           <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
           <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
+          <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
           <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
           <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
           <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
@@ -783,6 +785,7 @@ const I18N = {
     kb_create: '新建KB版本',
     kb_mgmt: 'KB 管理',
     export_chat: '导出聊天',
+    rename_chat: '重命名',
     brief_channel: '渠道',
     brief_prompt: '任务指令',
     brief_product: '产品',
@@ -808,6 +811,7 @@ const I18N = {
     upload_failed: '上传失败',
     upload_success: '上传成功',
     delete_confirm: '确定删除该聊天及其所有消息与文档吗？',
+    rename_prompt: '输入新的聊天名称',
     no_chat_selected: '请先选择一个聊天',
     documents_title: '文档',
     kb_none: '不使用KB',
@@ -819,7 +823,8 @@ const I18N = {
     kb_notes_prompt: '输入备注（可选）',
     kb_create_success: 'KB 版本已创建:',
     kb_create_failed: '创建 KB 失败',
-    export_failed: '导出失败'
+    export_failed: '导出失败',
+    rename_failed: '重命名失败'
   },
   en: {
     page_title: 'novaRed Chat',
@@ -835,6 +840,7 @@ const I18N = {
     kb_create: 'New KB Version',
     kb_mgmt: 'KB Management',
     export_chat: 'Export Chat',
+    rename_chat: 'Rename',
     brief_channel: 'Channel',
     brief_prompt: 'Prompt',
     brief_product: 'Product',
@@ -860,6 +866,7 @@ const I18N = {
     upload_failed: 'Upload failed',
     upload_success: 'Upload succeeded',
     delete_confirm: 'Delete this chat with all messages and documents?',
+    rename_prompt: 'Enter a new conversation title',
     no_chat_selected: 'Please select a conversation first',
     documents_title: 'Documents',
     kb_none: 'No KB',
@@ -871,7 +878,8 @@ const I18N = {
     kb_notes_prompt: 'Enter notes (optional)',
     kb_create_success: 'KB version created:',
     kb_create_failed: 'Failed to create KB',
-    export_failed: 'Export failed'
+    export_failed: 'Export failed',
+    rename_failed: 'Rename failed'
   }
 };
 
@@ -883,6 +891,7 @@ let kbVersions = [];
 let activeConversationId = null;
 let activeDocuments = [];
 let suppressKBChange = false;
+let editingConversationId = null;
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
 
 function currentConversation() {
@@ -1202,9 +1211,97 @@ function renderConversations() {
     const div = document.createElement('div');
     div.className = 'chat-item' + (c.id === activeConversationId ? ' active' : '');
     div.onclick = () => openConversation(c.id);
+    const row = document.createElement('div');
+    row.className = 'chat-row';
     const modeLabel = c.task_mode === 'marketing' ? t('mode_marketing') : t('mode_chat');
-    div.innerHTML = `<div class="chat-row"><div class="chat-title">${c.title}</div><span class="mode-pill">${modeLabel}</span></div><div class="chat-time">${fmt(c.updated_at)}</div>`;
+
+    if (editingConversationId === c.id) {
+      const input = document.createElement('input');
+      input.className = 'chat-title-input';
+      input.value = c.title || '';
+      input.onkeydown = async (event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          await submitInlineRename(c.id, input.value);
+        } else if (event.key === 'Escape') {
+          cancelInlineRename();
+        }
+      };
+      input.onblur = async () => {
+        await submitInlineRename(c.id, input.value);
+      };
+      input.onclick = (event) => event.stopPropagation();
+      input.ondblclick = (event) => event.stopPropagation();
+      row.appendChild(input);
+      setTimeout(() => {
+        const el = document.querySelector(`[data-rename-input="${c.id}"]`);
+        if (el) { el.focus(); el.select(); }
+      }, 0);
+      input.setAttribute('data-rename-input', String(c.id));
+    } else {
+      const title = document.createElement('div');
+      title.className = 'chat-title';
+      title.textContent = c.title;
+      title.ondblclick = (event) => {
+        event.stopPropagation();
+        startInlineRename(c.id);
+      };
+      row.appendChild(title);
+    }
+
+    const mode = document.createElement('span');
+    mode.className = 'mode-pill';
+    mode.textContent = modeLabel;
+    row.appendChild(mode);
+
+    const time = document.createElement('div');
+    time.className = 'chat-time';
+    time.textContent = fmt(c.updated_at);
+
+    div.appendChild(row);
+    div.appendChild(time);
     list.appendChild(div);
+  }
+}
+
+function startInlineRename(conversationId) {
+  if (!conversationId) return;
+  editingConversationId = conversationId;
+  renderConversations();
+}
+
+function cancelInlineRename() {
+  editingConversationId = null;
+  renderConversations();
+}
+
+async function submitInlineRename(conversationId, rawTitle) {
+  const title = (rawTitle || '').trim();
+  const target = conversations.find((x) => x.id === conversationId);
+  if (!title) {
+    cancelInlineRename();
+    return;
+  }
+  if (target && target.title === title) {
+    cancelInlineRename();
+    return;
+  }
+  try {
+    const data = await api(`/api/conversations/${conversationId}/title`, {
+      method:'PATCH',
+      body: JSON.stringify({ title })
+    });
+    conversations = conversations.map((c) => (
+      c.id === conversationId ? {...c, title: data.title, updated_at: data.updated_at} : c
+    ));
+    if (activeConversationId === conversationId) {
+      document.getElementById('chat-title').textContent = data.title;
+    }
+  } catch (e) {
+    alert(`${t('rename_failed')}: ${e.message}`);
+  } finally {
+    editingConversationId = null;
+    renderConversations();
   }
 }
 
@@ -1412,6 +1509,14 @@ async function exportConversation() {
   } catch (e) {
     alert(`${t('export_failed')}: ${e.message}`);
   }
+}
+
+async function renameConversation() {
+  if (!activeConversationId) {
+    alert(t('no_chat_selected'));
+    return;
+  }
+  startInlineRename(activeConversationId);
 }
 
 function gotoAdmin() { location.href = '/admin'; }
@@ -2375,6 +2480,10 @@ class ConversationModelInput(BaseModel):
     model_id: str = Field(min_length=3, max_length=128)
 
 
+class ConversationTitleInput(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 @app.delete("/api/conversations/{conversation_id}")
 def delete_conversation(conversation_id: int, request: Request) -> Any:
     user = must_login(request)
@@ -2418,6 +2527,22 @@ def update_conversation_model(conversation_id: int, body: ConversationModelInput
             (model_id, now, conversation_id),
         )
     return {"ok": True, "model_id": model_id, "updated_at": now}
+
+
+@app.patch("/api/conversations/{conversation_id}/title")
+def update_conversation_title(conversation_id: int, body: ConversationTitleInput, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title[:120], now, conversation_id),
+        )
+    return {"ok": True, "title": title[:120], "updated_at": now}
 
 
 @app.patch("/api/conversations/{conversation_id}/mode")

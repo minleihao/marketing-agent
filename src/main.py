@@ -103,7 +103,19 @@ def _is_allowed_model_id(model_id: str) -> bool:
 def _is_credentials_error(exc: Exception) -> bool:
     name = type(exc).__name__
     details = str(exc)
-    return name in {"NoCredentialsError", "NoRegionError"} or "Unable to locate credentials" in details
+    if name in {"NoCredentialsError", "NoRegionError", "TokenRetrievalError"}:
+        return True
+    credential_signals = [
+        "Unable to locate credentials",
+        "Token has expired",
+        "Unable to load credentials",
+        "UnrecognizedClientException",
+        "ExpiredToken",
+        "InvalidClientTokenId",
+        "AccessDenied",
+        "Error when retrieving token from sso",
+    ]
+    return any(signal in details for signal in credential_signals)
 
 
 def _local_fallback_response(

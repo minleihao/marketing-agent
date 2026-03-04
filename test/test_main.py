@@ -128,6 +128,23 @@ def test_invoke_returns_local_fallback_when_credentials_missing(monkeypatch):
     assert result["meta"]["reason"] == "missing_aws_credentials"
 
 
+def test_invoke_returns_local_fallback_when_sso_token_expired(monkeypatch):
+    class TokenRetrievalError(Exception):
+        pass
+
+    def boom(_prompt: str):
+        raise TokenRetrievalError("Error when retrieving token from sso: Token has expired and refresh failed")
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: boom)
+
+    result = main.invoke({"prompt": "write ad copy"})
+
+    assert "result" in result
+    assert "Local Fallback Mode" in result["result"]
+    assert result["meta"]["mode"] == "local_fallback"
+    assert result["meta"]["reason"] == "missing_aws_credentials"
+
+
 def test_invoke_accepts_agent_result_message_dict(monkeypatch):
     def fake_agent(_prompt: str):
         return SimpleNamespace(
