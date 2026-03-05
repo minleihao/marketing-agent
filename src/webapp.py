@@ -713,17 +713,27 @@ def _refresh_conversation_summary(conversation_id: int) -> None:
         summary_text = "\n".join(summary_lines)[-MEMORY_SUMMARY_MAX_CHARS:]
         source_message_id = ordered[-1]["id"]
         now = now_utc().isoformat()
-        conn.execute(
-            """
-            INSERT INTO conversation_memories (conversation_id, summary, source_message_id, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
-                summary = excluded.summary,
-                source_message_id = excluded.source_message_id,
-                updated_at = excluded.updated_at
-            """,
-            (conversation_id, summary_text, source_message_id, now),
-        )
+        existing = conn.execute(
+            "SELECT conversation_id FROM conversation_memories WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE conversation_memories
+                SET summary = ?, source_message_id = ?, updated_at = ?
+                WHERE conversation_id = ?
+                """,
+                (summary_text, source_message_id, now, conversation_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO conversation_memories (conversation_id, summary, source_message_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (conversation_id, summary_text, source_message_id, now),
+            )
 
 
 def _build_conversation_memory_context(conversation_id: int) -> str:
@@ -1308,6 +1318,8 @@ const I18N = {
     reg_password: '密码（至少 8 位）',
     default_admin: '首次可用默认管理员账号：admin / admin123456',
     login_failed: '登录失败',
+    invalid_credentials: '用户名或密码错误',
+    account_disabled: '账号已被禁用',
     register_failed: '注册失败'
   },
   en: {
@@ -1332,6 +1344,8 @@ const I18N = {
     reg_password: 'Password (at least 8 chars)',
     default_admin: 'Default admin account: admin / admin123456',
     login_failed: 'Login failed',
+    invalid_credentials: 'Invalid username or password',
+    account_disabled: 'This account is disabled',
     register_failed: 'Registration failed'
   }
 };
@@ -1396,8 +1410,14 @@ async function login() {
   const err = document.getElementById('login-err');
   err.textContent = '';
   const res = await fetch('/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password})});
-  const data = await res.json();
-  if (!res.ok) { err.textContent = data.detail || t('login_failed'); return; }
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) {
+    if (res.status === 401) { err.textContent = t('invalid_credentials'); return; }
+    if (res.status === 403) { err.textContent = t('account_disabled'); return; }
+    err.textContent = data.detail || t('login_failed');
+    return;
+  }
   location.href = '/app';
 }
 
@@ -2617,7 +2637,11 @@ async function api(url, options={}) {
   const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch (_) {}
-  if (!res.ok) throw new Error(data.detail || t('request_failed'));
+  if (!res.ok) {
+    const error = new Error(data.detail || t('request_failed'));
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -3820,8 +3844,13 @@ function gotoExperiments() { location.href = '/experiments'; }
         sendMessage();
       }
     });
-  } catch {
-    location.href = '/';
+  } catch (e) {
+    if (e && e.status === 401) {
+      location.href = '/';
+      return;
+    }
+    const message = e && e.message ? e.message : t('request_failed');
+    alert(`${t('request_failed')}: ${message}`);
   }
 })();
 </script>
@@ -5811,8 +5840,6 @@ function gotoAdmin() { location.href = '/admin'; }
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> Any:
-    if current_user(request):
-        return RedirectResponse(url="/app", status_code=302)
     return HTMLResponse(AUTH_HTML)
 
 
@@ -6455,14 +6482,30 @@ def upsert_experiment_variant(experiment_id: int, body: ExperimentVariantInput, 
         ).fetchone()
         if not exp:
             raise HTTPException(status_code=404, detail="Experiment not found")
-        conn.execute(
+        existing = conn.execute(
             """
-            INSERT INTO experiment_variants (experiment_id, variant_key, content, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(experiment_id, variant_key) DO UPDATE SET content = excluded.content
+            SELECT id FROM experiment_variants
+            WHERE experiment_id = ? AND variant_key = ?
             """,
-            (experiment_id, key[:40], body.content.strip()[:10000], now),
-        )
+            (experiment_id, key[:40]),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE experiment_variants
+                SET content = ?
+                WHERE experiment_id = ? AND variant_key = ?
+                """,
+                (body.content.strip()[:10000], experiment_id, key[:40]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO experiment_variants (experiment_id, variant_key, content, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (experiment_id, key[:40], body.content.strip()[:10000], now),
+            )
         conn.execute(
             "UPDATE experiments SET updated_at = ? WHERE id = ?",
             (now, experiment_id),
@@ -6516,31 +6559,31 @@ def list_brand_kb(request: Request) -> Any:
     with db_conn() as conn:
         rows = conn.execute(
             """
-            WITH visible AS (
-                SELECT b.*, u.username AS owner_username, g.name AS share_group_name
-                FROM brand_kb_versions b
-                LEFT JOIN users u ON u.id = b.owner_id
-                LEFT JOIN groups g ON g.id = b.share_group_id
-                LEFT JOIN group_memberships gm
-                  ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
-                WHERE b.owner_id = ?
-                   OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
-            ),
-            latest AS (
-                SELECT kb_key, MAX(version) AS latest_version
-                FROM visible
-                GROUP BY kb_key
-            )
-            SELECT v.kb_key, v.kb_name, v.version, v.owner_id, v.owner_username, v.visibility,
-                   v.share_group_id, v.share_group_name, v.brand_voice, v.created_at,
-                   v.positioning_json, v.glossary_json, v.forbidden_words_json, v.required_terms_json,
-                   v.claims_policy_json, v.examples_json, v.notes
-            FROM visible v
-            JOIN latest l ON l.kb_key = v.kb_key AND l.latest_version = v.version
-            ORDER BY v.kb_name COLLATE NOCASE ASC, v.kb_key ASC
+            SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username, b.visibility,
+                   b.share_group_id, g.name AS share_group_name, b.brand_voice, b.created_at,
+                   b.positioning_json, b.glossary_json, b.forbidden_words_json, b.required_terms_json,
+                   b.claims_policy_json, b.examples_json, b.notes
+            FROM brand_kb_versions b
+            LEFT JOIN users u ON u.id = b.owner_id
+            LEFT JOIN groups g ON g.id = b.share_group_id
+            LEFT JOIN group_memberships gm
+              ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+            JOIN (
+                SELECT b2.kb_key, MAX(b2.version) AS latest_version
+                FROM brand_kb_versions b2
+                LEFT JOIN group_memberships gm2
+                  ON gm2.group_id = b2.share_group_id AND gm2.user_id = ? AND gm2.status = 'approved'
+                WHERE b2.owner_id = ?
+                   OR (b2.visibility IN ('task', 'company') AND gm2.user_id IS NOT NULL)
+                GROUP BY b2.kb_key
+            ) latest
+              ON latest.kb_key = b.kb_key AND latest.latest_version = b.version
+            WHERE b.owner_id = ?
+               OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+            ORDER BY b.kb_name COLLATE NOCASE ASC, b.kb_key ASC
             """
             ,
-            (user["id"], user["id"]),
+            (user["id"], user["id"], user["id"], user["id"]),
         ).fetchall()
     return [_kb_row_to_dict(r) for r in rows]
 
