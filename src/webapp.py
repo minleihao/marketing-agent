@@ -62,6 +62,8 @@ SUPPORTED_MODELS = [
     "us.anthropic.claude-sonnet-4-6",
 ]
 TASK_MODES = {"chat", "marketing"}
+VISIBILITY_LEVELS = {"private", "task", "company"}
+GROUP_TYPES = {"task", "company"}
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".log", ".py", ".html", ".xml", ".yaml", ".yml"}
 
 DEFAULT_ADMIN_USER = os.getenv("NOVARED_ADMIN_USER", "admin")
@@ -120,6 +122,8 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 model_id TEXT NOT NULL DEFAULT 'us.amazon.nova-micro-v1:0',
                 task_mode TEXT NOT NULL DEFAULT 'chat',
+                visibility TEXT NOT NULL DEFAULT 'private',
+                share_group_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -150,6 +154,9 @@ def init_db() -> None:
                 kb_key TEXT NOT NULL,
                 kb_name TEXT NOT NULL,
                 version INTEGER NOT NULL,
+                owner_id INTEGER,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                share_group_id INTEGER,
                 brand_voice TEXT,
                 positioning_json TEXT NOT NULL DEFAULT '{}',
                 glossary_json TEXT NOT NULL DEFAULT '[]',
@@ -160,6 +167,30 @@ def init_db() -> None:
                 notes TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(kb_key, version)
+            );
+
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                group_type TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(name, group_type),
+                FOREIGN KEY(created_by) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS group_memberships (
+                group_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_by INTEGER,
+                created_at TEXT NOT NULL,
+                approved_at TEXT,
+                PRIMARY KEY(group_id, user_id),
+                FOREIGN KEY(group_id) REFERENCES groups(id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(requested_by) REFERENCES users(id)
             );
             """
         )
@@ -177,6 +208,21 @@ def init_db() -> None:
             conn.execute("ALTER TABLE conversations ADD COLUMN kb_version INTEGER")
         if "task_mode" not in conversation_cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'chat'")
+        if "visibility" not in conversation_cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+        if "share_group_id" not in conversation_cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN share_group_id INTEGER")
+
+        kb_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(brand_kb_versions)").fetchall()
+        }
+        if "owner_id" not in kb_cols:
+            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN owner_id INTEGER")
+            conn.execute("UPDATE brand_kb_versions SET owner_id = 1 WHERE owner_id IS NULL")
+        if "visibility" not in kb_cols:
+            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+        if "share_group_id" not in kb_cols:
+            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN share_group_id INTEGER")
 
         admin_exists = conn.execute(
             "SELECT id FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)
@@ -258,6 +304,74 @@ def create_session(user_id: int) -> tuple[str, datetime]:
     return token, expires_at
 
 
+def _normalize_visibility(raw: str | None) -> str:
+    value = (raw or "private").strip().lower()
+    if value not in VISIBILITY_LEVELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported visibility: {value}")
+    return value
+
+
+def _normalize_group_type(raw: str | None) -> str:
+    value = (raw or "").strip().lower()
+    if value not in GROUP_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported group_type: {value}")
+    return value
+
+
+def _is_group_member(user_id: int, group_id: int, *, approved_only: bool = True) -> bool:
+    query = (
+        "SELECT 1 FROM group_memberships WHERE group_id = ? AND user_id = ? AND status = 'approved'"
+        if approved_only
+        else "SELECT 1 FROM group_memberships WHERE group_id = ? AND user_id = ?"
+    )
+    with db_conn() as conn:
+        row = conn.execute(query, (group_id, user_id)).fetchone()
+    return bool(row)
+
+
+def _is_group_admin(user_id: int, group_id: int) -> bool:
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM group_memberships
+            WHERE group_id = ? AND user_id = ? AND status = 'approved' AND role = 'admin'
+            """,
+            (group_id, user_id),
+        ).fetchone()
+    return bool(row)
+
+
+def _validate_share_group_for_user(user_id: int, visibility: str, share_group_id: int | None) -> tuple[str, int | None]:
+    visibility_norm = _normalize_visibility(visibility)
+    if visibility_norm == "private":
+        return visibility_norm, None
+    if not share_group_id:
+        raise HTTPException(status_code=400, detail="share_group_id is required for non-private visibility")
+    with db_conn() as conn:
+        group_row = conn.execute(
+            "SELECT id, group_type FROM groups WHERE id = ?",
+            (share_group_id,),
+        ).fetchone()
+    if not group_row:
+        raise HTTPException(status_code=404, detail="Group not found")
+    expected_type = "company" if visibility_norm == "company" else "task"
+    if group_row["group_type"] != expected_type:
+        raise HTTPException(status_code=400, detail=f"visibility '{visibility_norm}' requires a {expected_type} group")
+    if not _is_group_member(user_id, share_group_id, approved_only=True):
+        raise HTTPException(status_code=403, detail="You are not an approved member of this group")
+    return visibility_norm, share_group_id
+
+
+def _can_user_view_by_visibility(user_id: int, owner_id: int, visibility: str, share_group_id: int | None) -> bool:
+    if owner_id == user_id:
+        return True
+    if visibility == "private":
+        return False
+    if share_group_id is None:
+        return False
+    return _is_group_member(user_id, share_group_id, approved_only=True)
+
+
 def conversation_owner_or_404(user_id: int, conversation_id: int) -> sqlite3.Row:
     with db_conn() as conn:
         row = conn.execute(
@@ -266,6 +380,21 @@ def conversation_owner_or_404(user_id: int, conversation_id: int) -> sqlite3.Row
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
+
+
+def conversation_visible_or_404(user_id: int, conversation_id: int) -> sqlite3.Row:
+    with db_conn() as conn:
+        row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not _can_user_view_by_visibility(
+        user_id=user_id,
+        owner_id=row["user_id"],
+        visibility=(row["visibility"] or "private"),
+        share_group_id=row["share_group_id"],
+    ):
+        raise HTTPException(status_code=403, detail="No access to this conversation")
     return row
 
 
@@ -512,10 +641,15 @@ Return ONLY valid JSON.
 
 
 def _kb_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    data = {
         "kb_key": row["kb_key"],
         "kb_name": row["kb_name"],
         "version": row["version"],
+        "owner_id": row["owner_id"] if "owner_id" in row.keys() else None,
+        "visibility": row["visibility"] if "visibility" in row.keys() else "private",
+        "share_group_id": row["share_group_id"] if "share_group_id" in row.keys() else None,
+        "share_group_name": row["share_group_name"] if "share_group_name" in row.keys() else None,
+        "owner_username": row["owner_username"] if "owner_username" in row.keys() else None,
         "brand_voice": row["brand_voice"],
         "positioning": _json_loads(row["positioning_json"], {}),
         "glossary": _json_loads(row["glossary_json"], []),
@@ -526,6 +660,7 @@ def _kb_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "notes": row["notes"],
         "created_at": row["created_at"],
     }
+    return data
 
 
 def _build_brand_kb_context(kb_key: str | None, kb_version: int | None) -> str:
@@ -578,6 +713,7 @@ def _build_brand_kb_context(kb_key: str | None, kb_version: int | None) -> str:
 class RegisterInput(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     password: str = Field(min_length=8, max_length=128)
+    join_group_ids: list[int] = Field(default_factory=list)
 
 
 class LoginInput(BaseModel):
@@ -588,6 +724,8 @@ class LoginInput(BaseModel):
 class ConversationCreateInput(BaseModel):
     title: str | None = None
     task_mode: str | None = None
+    visibility: str | None = "private"
+    share_group_id: int | None = None
 
 
 class MessageInput(BaseModel):
@@ -615,6 +753,8 @@ class BrandKBInput(BaseModel):
     kb_key: str = Field(min_length=1, max_length=80)
     kb_name: str | None = Field(default=None, max_length=120)
     brand_voice: str | None = Field(default=None, max_length=500)
+    visibility: str | None = "private"
+    share_group_id: int | None = None
     positioning: Any = Field(default_factory=dict)
     glossary: Any = Field(default_factory=list)
     forbidden_words: Any = Field(default_factory=list)
@@ -633,9 +773,37 @@ class ConversationModeInput(BaseModel):
     task_mode: str
 
 
+class ConversationModelInput(BaseModel):
+    model_id: str = Field(min_length=3, max_length=128)
+
+
+class ConversationVisibilityInput(BaseModel):
+    visibility: str
+    share_group_id: int | None = None
+
+
+class ConversationTitleInput(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class GroupCreateInput(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    group_type: str
+
+
+class GroupInviteInput(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+
+
+class GroupTransferAdminInput(BaseModel):
+    new_admin_user_id: int
+
+
 class BrandKBUpdateInput(BaseModel):
     kb_name: str | None = Field(default=None, max_length=120)
     brand_voice: str | None = Field(default=None, max_length=500)
+    visibility: str | None = None
+    share_group_id: int | None = None
     positioning: Any = Field(default_factory=dict)
     glossary: Any = Field(default_factory=list)
     forbidden_words: Any = Field(default_factory=list)
@@ -664,10 +832,26 @@ AUTH_HTML = """
     .card { background:linear-gradient(180deg,#ffffff,#fdfefe); border:1px solid var(--line); border-radius:16px; padding:22px; box-shadow:0 20px 45px rgba(18,30,58,.10); backdrop-filter: blur(2px); }
     h2 { margin:0 0 10px; font-weight:800; letter-spacing:.1px; }
     p { color:var(--muted); margin:0 0 16px; font-size:14px; }
-    input { width:100%; padding:11px; border:1px solid var(--line); border-radius:12px; margin-bottom:10px; transition:.2s ease; background:#fff; }
-    input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(21,101,216,.15); }
+    input, select { width:100%; padding:11px; border:1px solid var(--line); border-radius:12px; margin-bottom:10px; transition:.2s ease; background:#fff; font-family:inherit; }
+    input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(21,101,216,.15); }
+    select[multiple] { min-height:92px; padding:8px; }
     button { width:100%; border:0; border-radius:12px; padding:11px; background:linear-gradient(120deg,var(--accent),#0f8ad7); color:#fff; font-weight:700; cursor:pointer; transition:.2s ease; }
     button:hover { transform:translateY(-1px); box-shadow:0 10px 22px rgba(21,101,216,.28); }
+    .group-block { border:1px solid var(--line); background:#f7fbff; border-radius:12px; padding:10px; margin-bottom:10px; }
+    .group-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+    .group-label { font-size:12px; color:var(--muted); margin:0 0 5px; }
+    .group-help { font-size:12px; color:var(--muted); margin:0; }
+    .inline-btn {
+      width:auto;
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:7px 10px;
+      background:#fff;
+      color:var(--txt);
+      font-weight:700;
+      box-shadow:none;
+    }
+    .inline-btn:hover { transform:none; box-shadow:none; border-color:#bfc9db; }
     .err { color:#d1242f; font-size:13px; min-height:20px; }
     .note { margin-top:8px; font-size:12px; color:var(--muted); font-family:"IBM Plex Mono",ui-monospace,monospace; }
     @media (max-width: 760px) { .wrap { grid-template-columns:1fr; } }
@@ -690,9 +874,20 @@ AUTH_HTML = """
     </div>
     <div class="card">
       <h2 data-i18n="register_title">注册</h2>
-      <p data-i18n="register_subtitle">创建个人账号后可保存自己的对话记录。</p>
+      <p data-i18n="register_subtitle">创建个人账号后可保存自己的对话记录，并可申请加入组。</p>
       <input id="reg-username" data-i18n-placeholder="reg_username" placeholder="用户名（3-32 位）" />
       <input id="reg-password" data-i18n-placeholder="reg_password" placeholder="密码（至少 8 位）" type="password" />
+      <div class="group-block">
+        <div class="group-head">
+          <div class="group-label" data-i18n="register_group_optional">可选：注册时申请加入组</div>
+          <button type="button" class="inline-btn" onclick="loadPublicGroups()" data-i18n="refresh_groups">刷新组列表</button>
+        </div>
+        <div class="group-label" data-i18n="task_groups_label">任务小组（可多选）</div>
+        <select id="reg-task-groups" multiple></select>
+        <div class="group-label" data-i18n="company_groups_label">公司组（可多选）</div>
+        <select id="reg-company-groups" multiple></select>
+        <div class="group-help" data-i18n="register_group_hint">提交后会创建入组申请，需组管理员批准。</div>
+      </div>
       <button onclick="registerUser()" data-i18n="register_btn">创建账号</button>
       <div id="reg-err" class="err"></div>
     </div>
@@ -706,8 +901,16 @@ const I18N = {
     login_subtitle: '进入你的 Marketing Copilot 工作台。',
     login_btn: '登录',
     register_title: '注册',
-    register_subtitle: '创建个人账号后可保存自己的对话记录。',
+    register_subtitle: '创建个人账号后可保存自己的对话记录，并可申请加入组。',
     register_btn: '创建账号',
+    register_group_optional: '可选：注册时申请加入组',
+    task_groups_label: '任务小组（可多选）',
+    company_groups_label: '公司组（可多选）',
+    refresh_groups: '刷新组列表',
+    register_group_hint: '提交后会创建入组申请，需组管理员批准。',
+    no_task_groups: '暂无可选任务组',
+    no_company_groups: '暂无可选公司组',
+    group_load_failed: '组列表加载失败',
     username: '用户名',
     password: '密码',
     reg_username: '用户名（3-32 位）',
@@ -722,8 +925,16 @@ const I18N = {
     login_subtitle: 'Access your marketing agent workspace.',
     login_btn: 'Sign In',
     register_title: 'Register',
-    register_subtitle: 'Create your account to keep your own chat history.',
+    register_subtitle: 'Create your account, keep your own chat history, and request group access.',
     register_btn: 'Create Account',
+    register_group_optional: 'Optional: Request group access during registration',
+    task_groups_label: 'Task Groups (multi-select)',
+    company_groups_label: 'Company Groups (multi-select)',
+    refresh_groups: 'Refresh Groups',
+    register_group_hint: 'Registration will create join requests that require group admin approval.',
+    no_task_groups: 'No task groups available',
+    no_company_groups: 'No company groups available',
+    group_load_failed: 'Failed to load groups',
     username: 'Username',
     password: 'Password',
     reg_username: 'Username (3-32 chars)',
@@ -735,9 +946,40 @@ const I18N = {
 };
 
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let publicGroups = [];
 
 function t(key) {
   return (I18N[currentLang] && I18N[currentLang][key]) || key;
+}
+
+function setGroupSelectOptions(select, groups, emptyKey) {
+  const selectedValues = new Set([...select.selectedOptions].map((opt) => opt.value));
+  select.innerHTML = '';
+  if (!groups.length) {
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.disabled = true;
+    empty.textContent = t(emptyKey);
+    select.appendChild(empty);
+    return;
+  }
+  for (const group of groups) {
+    const option = document.createElement('option');
+    option.value = String(group.id);
+    option.textContent = `${group.name} (#${group.id})`;
+    if (selectedValues.has(option.value)) option.selected = true;
+    select.appendChild(option);
+  }
+}
+
+function renderPublicGroups() {
+  const taskSelect = document.getElementById('reg-task-groups');
+  const companySelect = document.getElementById('reg-company-groups');
+  if (!taskSelect || !companySelect) return;
+  const taskGroups = publicGroups.filter((g) => g.group_type === 'task');
+  const companyGroups = publicGroups.filter((g) => g.group_type === 'company');
+  setGroupSelectOptions(taskSelect, taskGroups, 'no_task_groups');
+  setGroupSelectOptions(companySelect, companyGroups, 'no_company_groups');
 }
 
 function applyI18n() {
@@ -747,6 +989,7 @@ function applyI18n() {
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
   document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+  renderPublicGroups();
 }
 
 function setLang(lang) {
@@ -766,17 +1009,49 @@ async function login() {
   location.href = '/app';
 }
 
+function selectedGroupIds(selectId) {
+  const select = document.getElementById(selectId);
+  if (!select) return [];
+  return [...select.selectedOptions]
+    .map((opt) => Number(opt.value))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
+async function loadPublicGroups() {
+  const err = document.getElementById('reg-err');
+  try {
+    const res = await fetch('/api/public/groups');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || t('group_load_failed'));
+    publicGroups = Array.isArray(data) ? data : [];
+    renderPublicGroups();
+  } catch (_) {
+    publicGroups = [];
+    renderPublicGroups();
+    if (err) err.textContent = t('group_load_failed');
+  }
+}
+
 async function registerUser() {
   const username = document.getElementById('reg-username').value.trim();
   const password = document.getElementById('reg-password').value;
+  const join_group_ids = Array.from(new Set([
+    ...selectedGroupIds('reg-task-groups'),
+    ...selectedGroupIds('reg-company-groups'),
+  ]));
   const err = document.getElementById('reg-err');
   err.textContent = '';
-  const res = await fetch('/register', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password})});
+  const res = await fetch('/register', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username, password, join_group_ids}),
+  });
   const data = await res.json();
   if (!res.ok) { err.textContent = data.detail || t('register_failed'); return; }
   location.href = '/app';
 }
 applyI18n();
+loadPublicGroups();
 </script>
 </body>
 </html>
@@ -974,15 +1249,40 @@ APP_HTML = """
       text-overflow:ellipsis;
       white-space:nowrap;
     }
-    .head-controls { display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-    .head-controls label { font-size:12px; color:var(--muted); }
-    .head-controls select {
+    .head-controls {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(170px, 1fr));
+      gap:6px 8px;
+      align-items:end;
+      width:min(760px, 100%);
+    }
+    .control {
+      display:flex;
+      flex-direction:column;
+      gap:3px;
+      min-width:0;
+    }
+    .control label { font-size:11px; color:var(--muted); line-height:1.15; }
+    .control select {
       border:1px solid var(--line);
       border-radius:10px;
-      padding:6px 8px;
+      padding:5px 8px;
       background:#fff;
-      min-width:120px;
+      min-width:0;
       color:var(--txt);
+      height:34px;
+    }
+    .head-actions {
+      grid-column:1 / -1;
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:wrap;
+      margin-top:1px;
+    }
+    .head-actions .btn {
+      padding:6px 8px;
+      font-size:12px;
     }
     .messages {
       padding:12px;
@@ -1093,7 +1393,7 @@ APP_HTML = """
       .root { grid-template-columns:300px 1fr; }
       .head strong { max-width:100%; font-size:18px; }
       .head { flex-direction:column; align-items:flex-start; }
-      .head-controls { justify-content:flex-start; }
+      .head-controls { width:100%; }
     }
     @media (max-width: 900px) {
       body { background:linear-gradient(160deg,var(--bg),var(--bg-soft)); }
@@ -1105,6 +1405,7 @@ APP_HTML = """
       .sidebar { height:36vh; border-right:1px solid var(--line); }
       .global-actions { width:100%; justify-content:flex-start; }
       .quick-actions { grid-template-columns:1fr; }
+      .head-controls { grid-template-columns:1fr; }
       .msg { max-width:96%; }
       .brief-grid { grid-template-columns:1fr; }
       .action { flex-direction:column; align-items:stretch; }
@@ -1124,6 +1425,7 @@ APP_HTML = """
           <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
         </div>
         <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
+        <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
         <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
         <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -1146,16 +1448,35 @@ APP_HTML = """
         <div class="head">
           <strong id="chat-title" data-i18n="no_conversation">未选择会话</strong>
           <div class="head-controls">
-            <label for="model-select" data-i18n="model_label">模型</label>
-            <select id="model-select" onchange="changeModel()"></select>
-            <label for="task-mode-select" data-i18n="mode_label">任务模式</label>
-            <select id="task-mode-select" onchange="changeTaskMode()">
-              <option value="chat" data-i18n="mode_chat">普通聊天</option>
-              <option value="marketing" data-i18n="mode_marketing">营销任务</option>
-            </select>
-            <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
-            <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
-            <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
+            <div class="control">
+              <label for="model-select" data-i18n="model_label">模型</label>
+              <select id="model-select" onchange="changeModel()"></select>
+            </div>
+            <div class="control">
+              <label for="task-mode-select" data-i18n="mode_label">任务模式</label>
+              <select id="task-mode-select" onchange="changeTaskMode()">
+                <option value="chat" data-i18n="mode_chat">普通聊天</option>
+                <option value="marketing" data-i18n="mode_marketing">营销任务</option>
+              </select>
+            </div>
+            <div class="control">
+              <label for="visibility-select" data-i18n="visibility_label">可见范围</label>
+              <select id="visibility-select" onchange="handleVisibilityModeChange()">
+                <option value="private" data-i18n="visibility_private">仅自己</option>
+                <option value="task" data-i18n="visibility_task">任务小组</option>
+                <option value="company" data-i18n="visibility_company">公司组</option>
+              </select>
+            </div>
+            <div class="control">
+              <label for="visibility-group-select" data-i18n="group_label">共享组</label>
+              <select id="visibility-group-select"></select>
+            </div>
+            <div class="head-actions">
+              <button class="btn" onclick="saveConversationVisibility()" data-i18n="save_visibility">保存权限</button>
+              <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
+              <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
+              <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
+            </div>
           </div>
         </div>
 
@@ -1236,6 +1557,7 @@ const I18N = {
     kb_version_label: '版本',
     kb_create: '新建KB版本',
     kb_mgmt: 'KB 管理',
+    group_mgmt: '组管理',
     export_chat: '导出聊天',
     rename_chat: '重命名',
     brief_channel: '渠道',
@@ -1246,6 +1568,13 @@ const I18N = {
     brief_extra_requirements: '额外要求',
     mode_chat: '普通聊天',
     mode_marketing: '营销任务',
+    visibility_label: '可见范围',
+    visibility_private: '仅自己',
+    visibility_task: '任务小组',
+    visibility_company: '公司组',
+    group_label: '共享组',
+    save_visibility: '保存权限',
+    visibility_saved: '权限已更新',
     delete_chat: '删除聊天',
     user_mgmt: '用户管理',
     logout: '退出',
@@ -1253,7 +1582,7 @@ const I18N = {
     upload_btn: '上传',
     input_placeholder: '输入你的营销任务，例如：给 B2B SaaS 产品写 3 个 LinkedIn 开场文案',
     chat_input_placeholder: '输入任意消息进行普通聊天',
-    hint: '每个用户仅能访问自己的会话和消息。',
+    hint: '默认仅自己可见；设置为任务组/公司组后，组内成员可共享访问。',
     send: '发送',
     current_user: '当前用户',
     thinking: '思考中...',
@@ -1280,7 +1609,10 @@ const I18N = {
     rename_failed: '重命名失败',
     conversations_empty: '还没有会话，点击上方按钮开始。',
     messages_empty: '从这里开始和 Agent 对话。',
-    documents_empty: '暂无上传文档。'
+    documents_empty: '暂无上传文档。',
+    shared_from: '共享自',
+    no_group_needed: '无需组',
+    choose_group: '请选择组'
   },
   en: {
     page_title: 'Marketing Copilot',
@@ -1296,6 +1628,7 @@ const I18N = {
     kb_version_label: 'Version',
     kb_create: 'New KB Version',
     kb_mgmt: 'KB Management',
+    group_mgmt: 'Group Management',
     export_chat: 'Export Chat',
     rename_chat: 'Rename',
     brief_channel: 'Channel',
@@ -1306,6 +1639,13 @@ const I18N = {
     brief_extra_requirements: 'Extra Requirements',
     mode_chat: 'Chat',
     mode_marketing: 'Marketing',
+    visibility_label: 'Visibility',
+    visibility_private: 'Private',
+    visibility_task: 'Task Group',
+    visibility_company: 'Company Group',
+    group_label: 'Share Group',
+    save_visibility: 'Save Visibility',
+    visibility_saved: 'Visibility updated',
     delete_chat: 'Delete Chat',
     user_mgmt: 'User Management',
     logout: 'Log Out',
@@ -1313,7 +1653,7 @@ const I18N = {
     upload_btn: 'Upload',
     input_placeholder: 'Type your marketing task, e.g., write 3 LinkedIn hooks for a B2B SaaS launch',
     chat_input_placeholder: 'Type a free-form message to chat with the agent',
-    hint: 'Each user can only access their own conversations and messages.',
+    hint: 'Private by default. Task-group/company visibility shares chats with approved members.',
     send: 'Send',
     current_user: 'Current user',
     thinking: 'Thinking...',
@@ -1340,7 +1680,10 @@ const I18N = {
     rename_failed: 'Rename failed',
     conversations_empty: 'No conversations yet. Start one from above.',
     messages_empty: 'Start chatting with your agent here.',
-    documents_empty: 'No uploaded documents yet.'
+    documents_empty: 'No uploaded documents yet.',
+    shared_from: 'Shared from',
+    no_group_needed: 'No group needed',
+    choose_group: 'Choose group'
   }
 };
 
@@ -1349,6 +1692,7 @@ let conversations = [];
 let models = [];
 let kbList = [];
 let kbVersions = [];
+let myGroups = [];
 let activeConversationId = null;
 let activeDocuments = [];
 let suppressKBChange = false;
@@ -1384,6 +1728,7 @@ function applyI18n() {
   }
   renderKBKeySelect();
   renderKBVersionSelect();
+  renderVisibilityGroupSelect();
   renderConversations();
   renderDocuments();
   const emptyMsg = document.querySelector('#messages .empty-state');
@@ -1392,6 +1737,7 @@ function applyI18n() {
   }
   syncTaskModeSelect();
   syncTaskModeUI();
+  syncConversationVisibilityUI();
 }
 
 function syncTaskModeUI() {
@@ -1463,11 +1809,113 @@ function syncTaskModeSelect() {
   select.value = active.task_mode || 'chat';
 }
 
+function renderVisibilityGroupSelect(visibilityMode = null) {
+  const select = document.getElementById('visibility-group-select');
+  if (!select) return;
+  const targetVisibility = visibilityMode || document.getElementById('visibility-select')?.value || 'private';
+  const requiredType = targetVisibility === 'company' ? 'company' : (targetVisibility === 'task' ? 'task' : null);
+  const previous = select.value;
+  select.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = t('no_group_needed');
+  select.appendChild(none);
+  const eligibleGroups = requiredType ? myGroups.filter((g) => g.group_type === requiredType) : myGroups;
+  for (const g of eligibleGroups) {
+    const option = document.createElement('option');
+    option.value = String(g.id);
+    const typeLabel = g.group_type === 'company' ? t('visibility_company') : t('visibility_task');
+    option.textContent = `${g.name} (${typeLabel})`;
+    option.dataset.groupType = g.group_type;
+    select.appendChild(option);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function syncConversationVisibilityUI() {
+  const visibilitySelect = document.getElementById('visibility-select');
+  const groupSelect = document.getElementById('visibility-group-select');
+  const active = currentConversation();
+  if (!activeConversationId || !active) {
+    visibilitySelect.value = 'private';
+    visibilitySelect.disabled = true;
+    groupSelect.value = '';
+    groupSelect.disabled = true;
+    return;
+  }
+  visibilitySelect.disabled = false;
+  visibilitySelect.value = active.visibility || 'private';
+  renderVisibilityGroupSelect(visibilitySelect.value);
+  const ownerId = active.user_id ?? null;
+  const isOwner = me && ownerId === me.id;
+  visibilitySelect.disabled = !isOwner;
+  groupSelect.disabled = !isOwner;
+  if (active.share_group_id) {
+    groupSelect.value = String(active.share_group_id);
+  } else {
+    groupSelect.value = '';
+  }
+  handleVisibilityModeChange();
+}
+
+function handleVisibilityModeChange() {
+  const visibilitySelect = document.getElementById('visibility-select');
+  const groupSelect = document.getElementById('visibility-group-select');
+  if (!visibilitySelect || !groupSelect) return;
+  renderVisibilityGroupSelect(visibilitySelect.value);
+  const active = currentConversation();
+  const ownerId = active ? (active.user_id ?? null) : null;
+  const isOwner = !!(me && active && ownerId === me.id);
+  if (!isOwner) return;
+  const vis = visibilitySelect.value;
+  if (vis === 'private') {
+    groupSelect.disabled = true;
+    groupSelect.value = '';
+  } else {
+    groupSelect.disabled = false;
+  }
+}
+
 async function loadModels() {
   const data = await api('/api/models');
   models = data.models || [];
   syncModelSelect();
   syncTaskModeSelect();
+}
+
+async function loadMyGroups() {
+  myGroups = await api('/api/groups/mine');
+  renderVisibilityGroupSelect();
+}
+
+async function saveConversationVisibility() {
+  if (!activeConversationId) {
+    alert(t('no_chat_selected'));
+    return;
+  }
+  const active = currentConversation();
+  if (!active || !me || active.user_id !== me.id) {
+    return;
+  }
+  const visibility = document.getElementById('visibility-select').value;
+  const rawGroup = document.getElementById('visibility-group-select').value;
+  const payload = {
+    visibility,
+    share_group_id: rawGroup ? Number(rawGroup) : null,
+  };
+  const data = await api(`/api/conversations/${activeConversationId}/visibility`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  conversations = conversations.map((c) => (
+    c.id === activeConversationId
+      ? {...c, visibility: data.visibility, share_group_id: data.share_group_id, share_group_name: data.share_group_name}
+      : c
+  ));
+  renderConversations();
+  syncConversationVisibilityUI();
 }
 
 function renderKBKeySelect() {
@@ -1735,7 +2183,10 @@ function renderConversations() {
 
     const time = document.createElement('div');
     time.className = 'chat-time';
-    time.textContent = fmt(c.updated_at);
+    const owner = c.owner_username || '';
+    const shared = me && owner && owner !== me.username;
+    const sharedPrefix = shared ? `${t('shared_from')}: ${owner} · ` : '';
+    time.textContent = `${sharedPrefix}${fmt(c.updated_at)}`;
 
     div.appendChild(row);
     div.appendChild(time);
@@ -1823,10 +2274,14 @@ async function loadConversations() {
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
+  syncConversationVisibilityUI();
 }
 
 async function createConversation(taskMode='chat') {
-  const created = await api('/api/conversations', {method:'POST', body:JSON.stringify({task_mode: taskMode})});
+  const created = await api('/api/conversations', {
+    method:'POST',
+    body:JSON.stringify({task_mode: taskMode, visibility: 'private', share_group_id: null})
+  });
   if (created.title === '新对话') {
     created.title = t('default_chat_title');
   }
@@ -1844,6 +2299,7 @@ async function createConversation(taskMode='chat') {
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
+  syncConversationVisibilityUI();
 }
 
 async function openConversation(id) {
@@ -1858,6 +2314,7 @@ async function openConversation(id) {
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
+  syncConversationVisibilityUI();
 }
 
 async function changeModel() {
@@ -2009,12 +2466,14 @@ async function renameConversation() {
 
 function gotoAdmin() { location.href = '/admin'; }
 function gotoKB() { location.href = '/kb'; }
+function gotoGroups() { location.href = '/groups'; }
 
 (async function init(){
   try {
     applyI18n();
     await loadMe();
     await loadModels();
+    await loadMyGroups();
     await loadKBList();
     await loadConversations();
     document.getElementById('input').addEventListener('keydown', (event) => {
@@ -2172,6 +2631,18 @@ KB_HTML = """
             <label for="kb-version-select-page" data-i18n="select_version">选择版本</label>
             <select id="kb-version-select-page" onchange="loadSelectedVersion()"></select>
           </div>
+          <div>
+            <label for="kb-visibility" data-i18n="visibility_label">可见范围</label>
+            <select id="kb-visibility" onchange="onKBVisibilityChange()">
+              <option value="private" data-i18n="visibility_private">仅自己</option>
+              <option value="task" data-i18n="visibility_task">任务小组</option>
+              <option value="company" data-i18n="visibility_company">公司组</option>
+            </select>
+          </div>
+          <div>
+            <label for="kb-share-group" data-i18n="group_label">共享组</label>
+            <select id="kb-share-group"></select>
+          </div>
           <div class="full">
             <label for="kb-key-input" data-i18n="new_key">新版本目标 Key（可新建）</label>
             <input id="kb-key-input" placeholder="brand_main" />
@@ -2231,6 +2702,12 @@ const I18N = {
     kb_list: 'KB 列表',
     select_key: '选择 KB Key',
     select_version: '选择版本',
+    visibility_label: '可见范围',
+    visibility_private: '仅自己',
+    visibility_task: '任务小组',
+    visibility_company: '公司组',
+    group_label: '共享组',
+    no_group_needed: '无需组',
     new_key: '新版本目标 Key（可新建）',
     kb_name: 'KB 名称',
     brand_voice: '品牌语调',
@@ -2252,7 +2729,8 @@ const I18N = {
     delete_confirm: '确定删除该 KB 版本吗？',
     required_key: '请输入 KB Key',
     invalid_json: 'JSON 格式错误',
-    kb_empty: '还没有 KB 版本，请先在右侧创建。'
+    kb_empty: '还没有 KB 版本，请先在右侧创建。',
+    shared_from: '共享自'
   },
   en: {
     title: 'Brand KB Management',
@@ -2261,6 +2739,12 @@ const I18N = {
     kb_list: 'KB List',
     select_key: 'Select KB Key',
     select_version: 'Select Version',
+    visibility_label: 'Visibility',
+    visibility_private: 'Private',
+    visibility_task: 'Task Group',
+    visibility_company: 'Company Group',
+    group_label: 'Share Group',
+    no_group_needed: 'No group needed',
     new_key: 'Target key for new version',
     kb_name: 'KB Name',
     brand_voice: 'Brand Voice',
@@ -2282,13 +2766,16 @@ const I18N = {
     delete_confirm: 'Delete this KB version?',
     required_key: 'KB key is required',
     invalid_json: 'Invalid JSON',
-    kb_empty: 'No KB versions yet. Create one from the form.'
+    kb_empty: 'No KB versions yet. Create one from the form.',
+    shared_from: 'Shared from'
   }
 };
 
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
 let kbList = [];
 let kbVersions = [];
+let myGroups = [];
+let me = null;
 
 function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
 function setMsg(text, isWarn=false) {
@@ -2302,6 +2789,7 @@ function applyI18n() {
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
   document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+  renderGroupSelect();
   renderKBList();
   renderKBKeySelect();
   renderVersionSelect();
@@ -2349,8 +2837,45 @@ function renderKBList() {
       document.getElementById('kb-key-select').value = kb.kb_key;
       await changeKBKey();
     };
-    div.innerHTML = `<div class="name">${kb.kb_name}</div><div class="meta">${kb.kb_key} · v${kb.version}</div>`;
+    const shared = me && kb.owner_username && kb.owner_username !== me.username;
+    const sharedText = shared ? ` · ${t('shared_from')}: ${kb.owner_username}` : '';
+    div.innerHTML = `<div class="name">${kb.kb_name}</div><div class="meta">${kb.kb_key} · v${kb.version}${sharedText}</div>`;
     box.appendChild(div);
+  }
+}
+function renderGroupSelect() {
+  const select = document.getElementById('kb-share-group');
+  if (!select) return;
+  const visibility = document.getElementById('kb-visibility')?.value || 'private';
+  const requiredType = visibility === 'company' ? 'company' : (visibility === 'task' ? 'task' : null);
+  const previous = select.value;
+  select.innerHTML = '';
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = t('no_group_needed');
+  select.appendChild(empty);
+  const eligibleGroups = requiredType ? myGroups.filter((g) => g.group_type === requiredType) : myGroups;
+  for (const g of eligibleGroups) {
+    const option = document.createElement('option');
+    option.value = String(g.id);
+    const typeLabel = g.group_type === 'company' ? t('visibility_company') : t('visibility_task');
+    option.textContent = `${g.name} (${typeLabel})`;
+    option.dataset.groupType = g.group_type;
+    select.appendChild(option);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
+  }
+}
+function onKBVisibilityChange() {
+  renderGroupSelect();
+  const visibility = document.getElementById('kb-visibility').value;
+  const groupSelect = document.getElementById('kb-share-group');
+  if (visibility === 'private') {
+    groupSelect.disabled = true;
+    groupSelect.value = '';
+  } else {
+    groupSelect.disabled = false;
   }
 }
 function renderKBKeySelect() {
@@ -2401,11 +2926,16 @@ function fillForm(data) {
   document.getElementById('kb-claims').value = stringify(data.claims_policy || {});
   document.getElementById('kb-examples').value = stringify(data.examples ?? null);
   document.getElementById('kb-notes').value = data.notes || '';
+  document.getElementById('kb-visibility').value = data.visibility || 'private';
+  document.getElementById('kb-share-group').value = data.share_group_id ? String(data.share_group_id) : '';
+  onKBVisibilityChange();
 }
 function collectPayload() {
   return {
     kb_name: document.getElementById('kb-name').value.trim() || null,
     brand_voice: document.getElementById('kb-brand-voice').value.trim() || null,
+    visibility: document.getElementById('kb-visibility').value,
+    share_group_id: document.getElementById('kb-share-group').value ? Number(document.getElementById('kb-share-group').value) : null,
     positioning: parseJSON(document.getElementById('kb-positioning').value, {}),
     glossary: parseJSON(document.getElementById('kb-glossary').value, []),
     forbidden_words: parseJSON(document.getElementById('kb-forbidden').value, []),
@@ -2419,6 +2949,10 @@ async function refreshKBList() {
   kbList = await api('/api/kb/list');
   renderKBList();
   renderKBKeySelect();
+}
+async function loadMyGroups() {
+  myGroups = await api('/api/groups/mine');
+  renderGroupSelect();
 }
 async function changeKBKey() {
   const key = document.getElementById('kb-key-select').value;
@@ -2492,8 +3026,396 @@ function backToApp() { location.href = '/app'; }
 (async function init() {
   applyI18n();
   try {
-    await api('/api/me');
+    me = await api('/api/me');
+    await loadMyGroups();
     await refreshKBList();
+  } catch {
+    location.href = '/';
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+GROUPS_HTML = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Marketing Copilot - Groups</title>
+  <style>
+    body { margin:0; font-family:"IBM Plex Sans","Segoe UI",sans-serif; background:#f2f6ff; color:#142136; }
+    .wrap { max-width:1180px; margin:16px auto; padding:0 12px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
+    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .toolbar button.active { background:#0a67d3; color:#fff; border-color:#0a67d3; }
+    .layout { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .card { background:#fff; border:1px solid #d6dfec; border-radius:14px; padding:12px; box-shadow:0 8px 20px rgba(16,32,62,.08); }
+    h2, h3 { margin:0 0 10px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+    input, select, button { padding:8px 10px; border:1px solid #d6dfec; border-radius:10px; background:#fff; }
+    button { cursor:pointer; font-weight:600; }
+    .list { display:flex; flex-direction:column; gap:8px; max-height:260px; overflow:auto; }
+    .item { border:1px solid #d6dfec; border-radius:10px; padding:8px; }
+    .meta { font-size:12px; color:#5b6b80; margin-top:4px; }
+    .small { font-size:12px; color:#5b6b80; }
+    .ok { color:#0f766e; }
+    .warn { color:#b91c1c; }
+    @media (max-width: 980px) { .layout { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h2 data-i18n="title">组管理</h2>
+      <div class="toolbar">
+        <button id="lang-zh" onclick="setLang('zh')">中文</button>
+        <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="backToApp()" data-i18n="back">返回聊天</button>
+        <button onclick="logout()" data-i18n="logout">退出</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <h3 data-i18n="create_group">创建组</h3>
+        <div class="row">
+          <input id="new-group-name" data-i18n-placeholder="group_name" placeholder="组名称" />
+          <select id="new-group-type">
+            <option value="company" data-i18n="company_group">公司组</option>
+            <option value="task" data-i18n="task_group">任务小组</option>
+          </select>
+          <button onclick="createGroup()" data-i18n="create">创建</button>
+        </div>
+        <div id="create-msg" class="small"></div>
+
+        <h3 style="margin-top:14px" data-i18n="my_groups">我的组</h3>
+        <div class="row">
+          <select id="manage-group-select" onchange="loadManageGroup()"></select>
+        </div>
+        <div id="my-groups" class="list"></div>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="all_groups">可加入的组</h3>
+        <div id="all-groups" class="list"></div>
+        <h3 style="margin-top:14px" data-i18n="invites">我的邀请</h3>
+        <div id="invites" class="list"></div>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="members">组成员</h3>
+        <div id="members" class="list"></div>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="requests">待审批请求</h3>
+        <div id="requests" class="list"></div>
+        <div class="row" style="margin-top:10px">
+          <input id="invite-username" data-i18n-placeholder="invite_user" placeholder="邀请用户名" />
+          <button onclick="inviteUser()" data-i18n="invite">邀请</button>
+        </div>
+        <div class="row">
+          <input id="transfer-user-id" data-i18n-placeholder="transfer_user_id" placeholder="新管理员 user_id" />
+          <button onclick="transferAdmin()" data-i18n="transfer_admin">转移管理员</button>
+        </div>
+        <div id="manage-msg" class="small"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const I18N = {
+  zh: {
+    title: '组管理',
+    back: '返回聊天',
+    logout: '退出',
+    create_group: '创建组',
+    group_name: '组名称',
+    company_group: '公司组',
+    task_group: '任务小组',
+    create: '创建',
+    my_groups: '我的组',
+    all_groups: '可加入的组',
+    invites: '我的邀请',
+    members: '组成员',
+    requests: '待审批请求',
+    invite_user: '邀请用户名',
+    invite: '邀请',
+    transfer_user_id: '新管理员 user_id',
+    transfer_admin: '转移管理员',
+    join: '申请加入',
+    approve: '批准',
+    reject: '拒绝',
+    accept: '接受',
+    no_data: '暂无数据',
+    admin: '管理员',
+    member: '成员',
+    approved: '已批准',
+    pending: '待审批',
+    invited: '已邀请',
+    save_ok: '操作成功',
+    save_fail: '操作失败'
+  },
+  en: {
+    title: 'Group Management',
+    back: 'Back to Chat',
+    logout: 'Log Out',
+    create_group: 'Create Group',
+    group_name: 'Group name',
+    company_group: 'Company Group',
+    task_group: 'Task Group',
+    create: 'Create',
+    my_groups: 'My Groups',
+    all_groups: 'Discover Groups',
+    invites: 'My Invitations',
+    members: 'Members',
+    requests: 'Pending Requests',
+    invite_user: 'Username to invite',
+    invite: 'Invite',
+    transfer_user_id: 'New admin user_id',
+    transfer_admin: 'Transfer Admin',
+    join: 'Request Join',
+    approve: 'Approve',
+    reject: 'Reject',
+    accept: 'Accept',
+    no_data: 'No data',
+    admin: 'Admin',
+    member: 'Member',
+    approved: 'Approved',
+    pending: 'Pending',
+    invited: 'Invited',
+    save_ok: 'Operation succeeded',
+    save_fail: 'Operation failed'
+  }
+};
+
+let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let me = null;
+let myGroups = [];
+let allGroups = [];
+
+function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
+function setLang(lang) {
+  currentLang = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('nova_lang', currentLang);
+  applyI18n();
+  renderAll();
+}
+function applyI18n() {
+  document.title = t('title');
+  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
+  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+}
+async function api(url, options={}) {
+  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data.detail || 'Request failed');
+  return data;
+}
+function roleLabel(role) { return role === 'admin' ? t('admin') : t('member'); }
+function statusLabel(status) {
+  if (status === 'approved') return t('approved');
+  if (status === 'pending') return t('pending');
+  if (status === 'invited') return t('invited');
+  return status || '';
+}
+function renderAll() {
+  renderMyGroups();
+  renderDiscoverGroups();
+}
+function renderMyGroups() {
+  const box = document.getElementById('my-groups');
+  const select = document.getElementById('manage-group-select');
+  box.innerHTML = '';
+  select.innerHTML = '';
+  if (!myGroups.length) {
+    box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
+  for (const g of myGroups) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.innerHTML = `<div><strong>${g.name}</strong> (${g.group_type})</div><div class="meta">${roleLabel(g.role)} · ${statusLabel(g.status)}</div>`;
+    box.appendChild(item);
+    const opt = document.createElement('option');
+    opt.value = String(g.id);
+    opt.textContent = `${g.name} (${g.group_type})`;
+    select.appendChild(opt);
+  }
+}
+function renderDiscoverGroups() {
+  const box = document.getElementById('all-groups');
+  box.innerHTML = '';
+  if (!allGroups.length) {
+    box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
+  for (const g of allGroups) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    const status = g.my_status ? statusLabel(g.my_status) : '';
+    item.innerHTML = `
+      <div><strong>${g.name}</strong> (${g.group_type})</div>
+      <div class="meta">members: ${g.approved_member_count}${status ? ` · ${status}` : ''}</div>
+      <div class="row" style="margin-top:6px">
+        <button onclick="joinGroup(${g.id})">${t('join')}</button>
+      </div>`;
+    box.appendChild(item);
+  }
+}
+async function refreshData() {
+  [me, myGroups, allGroups] = await Promise.all([
+    api('/api/me'),
+    api('/api/groups/mine'),
+    api('/api/groups'),
+  ]);
+  await loadInvites();
+  renderAll();
+  await loadManageGroup();
+}
+async function loadInvites() {
+  const invites = await api('/api/groups/invitations');
+  const box = document.getElementById('invites');
+  box.innerHTML = '';
+  if (!invites.length) {
+    box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
+  for (const inv of invites) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.innerHTML = `
+      <div><strong>${inv.name}</strong> (${inv.group_type})</div>
+      <div class="meta">${inv.invited_by || ''}</div>
+      <div class="row" style="margin-top:6px">
+        <button onclick="acceptInvite(${inv.group_id})">${t('accept')}</button>
+        <button onclick="rejectInvite(${inv.group_id})">${t('reject')}</button>
+      </div>`;
+    box.appendChild(item);
+  }
+}
+async function createGroup() {
+  const name = document.getElementById('new-group-name').value.trim();
+  const group_type = document.getElementById('new-group-type').value;
+  const msg = document.getElementById('create-msg');
+  try {
+    await api('/api/groups', {method:'POST', body: JSON.stringify({name, group_type})});
+    msg.textContent = t('save_ok');
+    msg.className = 'small ok';
+    await refreshData();
+  } catch (e) {
+    msg.textContent = `${t('save_fail')}: ${e.message}`;
+    msg.className = 'small warn';
+  }
+}
+async function joinGroup(groupId) {
+  try {
+    await api(`/api/groups/${groupId}/join`, {method:'POST'});
+    await refreshData();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+async function acceptInvite(groupId) {
+  await api(`/api/groups/${groupId}/invitations/accept`, {method:'POST'});
+  await refreshData();
+}
+async function rejectInvite(groupId) {
+  await api(`/api/groups/${groupId}/invitations/reject`, {method:'POST'});
+  await refreshData();
+}
+async function loadManageGroup() {
+  const groupIdRaw = document.getElementById('manage-group-select').value;
+  const membersBox = document.getElementById('members');
+  const reqBox = document.getElementById('requests');
+  membersBox.innerHTML = '';
+  reqBox.innerHTML = '';
+  if (!groupIdRaw) {
+    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
+  const groupId = Number(groupIdRaw);
+  const [members, requests] = await Promise.all([
+    api(`/api/groups/${groupId}/members`),
+    api(`/api/groups/${groupId}/requests`)
+  ]);
+  if (!members.length) {
+    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+  } else {
+    for (const m of members) {
+      const item = document.createElement('div');
+      item.className = 'item';
+      item.innerHTML = `<div><strong>${m.username}</strong> (#${m.user_id})</div><div class="meta">${roleLabel(m.role)} · ${statusLabel(m.status)}</div>`;
+      membersBox.appendChild(item);
+    }
+  }
+  if (!requests.length) {
+    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+  } else {
+    for (const r of requests) {
+      const item = document.createElement('div');
+      item.className = 'item';
+      item.innerHTML = `
+        <div><strong>${r.username}</strong> (#${r.user_id})</div>
+        <div class="meta">${statusLabel(r.status)}</div>
+        <div class="row" style="margin-top:6px">
+          <button onclick="approveRequest(${groupId}, ${r.user_id})">${t('approve')}</button>
+          <button onclick="rejectRequest(${groupId}, ${r.user_id})">${t('reject')}</button>
+        </div>`;
+      reqBox.appendChild(item);
+    }
+  }
+}
+async function approveRequest(groupId, userId) {
+  await api(`/api/groups/${groupId}/requests/${userId}/approve`, {method:'POST'});
+  await loadManageGroup();
+}
+async function rejectRequest(groupId, userId) {
+  await api(`/api/groups/${groupId}/requests/${userId}/reject`, {method:'POST'});
+  await loadManageGroup();
+}
+async function inviteUser() {
+  const groupIdRaw = document.getElementById('manage-group-select').value;
+  if (!groupIdRaw) return;
+  const username = document.getElementById('invite-username').value.trim();
+  await api(`/api/groups/${groupIdRaw}/invite`, {method:'POST', body: JSON.stringify({username})});
+  await loadManageGroup();
+}
+async function transferAdmin() {
+  const groupIdRaw = document.getElementById('manage-group-select').value;
+  if (!groupIdRaw) return;
+  const new_admin_user_id = Number(document.getElementById('transfer-user-id').value);
+  if (!new_admin_user_id) return;
+  const msg = document.getElementById('manage-msg');
+  try {
+    await api(`/api/groups/${groupIdRaw}/transfer-admin`, {
+      method:'POST',
+      body: JSON.stringify({new_admin_user_id})
+    });
+    msg.textContent = t('save_ok');
+    msg.className = 'small ok';
+    await refreshData();
+  } catch (e) {
+    msg.textContent = `${t('save_fail')}: ${e.message}`;
+    msg.className = 'small warn';
+  }
+}
+async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
+function backToApp() { location.href = '/app'; }
+
+(async function init() {
+  applyI18n();
+  try {
+    await refreshData();
   } catch {
     location.href = '/';
   }
@@ -2821,8 +3743,21 @@ def index(request: Request) -> Any:
 def register(body: RegisterInput) -> Any:
     username = body.username.strip()
     salt, pwd_hash = hash_password(body.password)
+    requested_group_ids = sorted({gid for gid in body.join_group_ids if isinstance(gid, int) and gid > 0})
+    if len(requested_group_ids) > 20:
+        raise HTTPException(status_code=400, detail="最多可申请加入 20 个组")
     try:
         with db_conn() as conn:
+            if requested_group_ids:
+                placeholders = ",".join(["?"] * len(requested_group_ids))
+                existing_rows = conn.execute(
+                    f"SELECT id FROM groups WHERE id IN ({placeholders})",
+                    tuple(requested_group_ids),
+                ).fetchall()
+                existing_ids = {row["id"] for row in existing_rows}
+                missing_ids = [gid for gid in requested_group_ids if gid not in existing_ids]
+                if missing_ids:
+                    raise HTTPException(status_code=400, detail=f"组不存在: {missing_ids}")
             conn.execute(
                 """
                 INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, created_at)
@@ -2831,11 +3766,20 @@ def register(body: RegisterInput) -> Any:
                 (username, salt, pwd_hash, now_utc().isoformat()),
             )
             user_id = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()["id"]
+            if requested_group_ids:
+                created_at = now_utc().isoformat()
+                conn.executemany(
+                    """
+                    INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at)
+                    VALUES (?, ?, 'member', 'pending', ?, ?)
+                    """,
+                    [(gid, user_id, user_id, created_at) for gid in requested_group_ids],
+                )
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="用户名已存在")
 
     token, exp = create_session(user_id)
-    response = JSONResponse({"ok": True})
+    response = JSONResponse({"ok": True, "group_requests_created": len(requested_group_ids)})
     response.set_cookie(
         SESSION_COOKIE,
         token,
@@ -2892,6 +3836,13 @@ def kb_page(request: Request) -> Any:
     return HTMLResponse(KB_HTML)
 
 
+@app.get("/groups", response_class=HTMLResponse)
+def groups_page(request: Request) -> Any:
+    if not current_user(request):
+        return RedirectResponse(url="/", status_code=302)
+    return HTMLResponse(GROUPS_HTML)
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request) -> Any:
     user = current_user(request)
@@ -2912,71 +3863,456 @@ def api_me(request: Request) -> Any:
     }
 
 
-@app.get("/api/kb/list")
-def list_brand_kb(request: Request) -> Any:
-    must_login(request)
+@app.get("/api/public/groups")
+def list_public_groups() -> Any:
     with db_conn() as conn:
         rows = conn.execute(
             """
-            WITH latest AS (
-                SELECT kb_key, MAX(version) AS latest_version
-                FROM brand_kb_versions
-                GROUP BY kb_key
-            )
-            SELECT b.kb_key, b.kb_name, b.version, b.brand_voice, b.created_at
-            FROM brand_kb_versions b
-            JOIN latest l ON l.kb_key = b.kb_key AND l.latest_version = b.version
-            ORDER BY b.kb_name COLLATE NOCASE ASC, b.kb_key ASC
+            SELECT g.id, g.name, g.group_type, g.created_by, g.created_at,
+                   (
+                       SELECT COUNT(*) FROM group_memberships x
+                       WHERE x.group_id = g.id AND x.status = 'approved'
+                   ) AS approved_member_count
+            FROM groups g
+            ORDER BY
+                CASE g.group_type
+                    WHEN 'company' THEN 0
+                    ELSE 1
+                END,
+                g.name COLLATE NOCASE ASC
             """
         ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/groups")
+def list_groups(request: Request, group_type: str | None = None) -> Any:
+    user = must_login(request)
+    normalized_type = None
+    if group_type:
+        normalized_type = _normalize_group_type(group_type)
+    with db_conn() as conn:
+        if normalized_type:
+            rows = conn.execute(
+                """
+                SELECT g.id, g.name, g.group_type, g.created_by, g.created_at,
+                       gm.status AS my_status, gm.role AS my_role,
+                       (
+                           SELECT COUNT(*) FROM group_memberships x
+                           WHERE x.group_id = g.id AND x.status = 'approved'
+                       ) AS approved_member_count
+                FROM groups g
+                LEFT JOIN group_memberships gm ON gm.group_id = g.id AND gm.user_id = ?
+                WHERE g.group_type = ?
+                ORDER BY g.name COLLATE NOCASE ASC
+                """,
+                (user["id"], normalized_type),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT g.id, g.name, g.group_type, g.created_by, g.created_at,
+                       gm.status AS my_status, gm.role AS my_role,
+                       (
+                           SELECT COUNT(*) FROM group_memberships x
+                           WHERE x.group_id = g.id AND x.status = 'approved'
+                       ) AS approved_member_count
+                FROM groups g
+                LEFT JOIN group_memberships gm ON gm.group_id = g.id AND gm.user_id = ?
+                ORDER BY g.group_type ASC, g.name COLLATE NOCASE ASC
+                """,
+                (user["id"],),
+            ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/groups/mine")
+def list_my_groups(request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.id, g.name, g.group_type, g.created_by, g.created_at, gm.role, gm.status
+            FROM group_memberships gm
+            JOIN groups g ON g.id = gm.group_id
+            WHERE gm.user_id = ? AND gm.status = 'approved'
+            ORDER BY g.group_type ASC, g.name COLLATE NOCASE ASC
+            """,
+            (user["id"],),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/groups/invitations")
+def list_my_invitations(request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.id AS group_id, g.name, g.group_type, gm.created_at, gm.requested_by, u.username AS invited_by
+            FROM group_memberships gm
+            JOIN groups g ON g.id = gm.group_id
+            LEFT JOIN users u ON u.id = gm.requested_by
+            WHERE gm.user_id = ? AND gm.status = 'invited'
+            ORDER BY gm.created_at DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/groups")
+def create_group(body: GroupCreateInput, request: Request) -> Any:
+    user = must_login(request)
+    group_type = _normalize_group_type(body.group_type)
+    name = body.name.strip()
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO groups (name, group_type, created_by, created_at) VALUES (?, ?, ?, ?)",
+                (name[:80], group_type, user["id"], now),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Group with same name and type already exists")
+        group_id = cur.lastrowid
+        conn.execute(
+            """
+            INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at, approved_at)
+            VALUES (?, ?, 'admin', 'approved', ?, ?, ?)
+            """,
+            (group_id, user["id"], user["id"], now, now),
+        )
+    return {
+        "id": group_id,
+        "name": name[:80],
+        "group_type": group_type,
+        "created_by": user["id"],
+        "created_at": now,
+        "my_status": "approved",
+        "my_role": "admin",
+    }
+
+
+@app.post("/api/groups/{group_id}/join")
+def request_group_join(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        group_row = conn.execute("SELECT id FROM groups WHERE id = ?", (group_id,)).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+        existing = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        ).fetchone()
+        if existing:
+            status = existing["status"]
+            if status == "approved":
+                return {"ok": True, "status": "approved"}
+            if status in {"pending", "invited"}:
+                return {"ok": True, "status": status}
+            conn.execute(
+                "UPDATE group_memberships SET status = 'pending', requested_by = ?, created_at = ?, approved_at = NULL WHERE group_id = ? AND user_id = ?",
+                (user["id"], now, group_id, user["id"]),
+            )
+            return {"ok": True, "status": "pending"}
+        conn.execute(
+            """
+            INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at)
+            VALUES (?, ?, 'member', 'pending', ?, ?)
+            """,
+            (group_id, user["id"], user["id"], now),
+        )
+    return {"ok": True, "status": "pending"}
+
+
+@app.get("/api/groups/{group_id}/members")
+def list_group_members(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_member(user["id"], group_id, approved_only=True):
+        raise HTTPException(status_code=403, detail="No access to this group")
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT gm.user_id, u.username, gm.role, gm.status, gm.created_at, gm.approved_at
+            FROM group_memberships gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ?
+            ORDER BY CASE gm.role WHEN 'admin' THEN 0 ELSE 1 END, u.username COLLATE NOCASE ASC
+            """,
+            (group_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/groups/{group_id}/requests")
+def list_group_requests(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_admin(user["id"], group_id):
+        raise HTTPException(status_code=403, detail="Admin only for this group")
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT gm.user_id, u.username, gm.status, gm.created_at, gm.requested_by, ru.username AS requested_by_username
+            FROM group_memberships gm
+            JOIN users u ON u.id = gm.user_id
+            LEFT JOIN users ru ON ru.id = gm.requested_by
+            WHERE gm.group_id = ? AND gm.status IN ('pending', 'invited')
+            ORDER BY gm.created_at ASC
+            """,
+            (group_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/groups/{group_id}/requests/{member_user_id}/approve")
+def approve_group_request(group_id: int, member_user_id: int, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_admin(user["id"], group_id):
+        raise HTTPException(status_code=403, detail="Admin only for this group")
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, member_user_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Membership request not found")
+        conn.execute(
+            "UPDATE group_memberships SET status = 'approved', approved_at = ? WHERE group_id = ? AND user_id = ?",
+            (now, group_id, member_user_id),
+        )
+    return {"ok": True, "status": "approved"}
+
+
+@app.post("/api/groups/{group_id}/requests/{member_user_id}/reject")
+def reject_group_request(group_id: int, member_user_id: int, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_admin(user["id"], group_id):
+        raise HTTPException(status_code=403, detail="Admin only for this group")
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, member_user_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Membership request not found")
+        if row["status"] == "approved":
+            raise HTTPException(status_code=400, detail="Cannot reject an approved member")
+        conn.execute(
+            "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, member_user_id),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/groups/{group_id}/invite")
+def invite_user_to_group(group_id: int, body: GroupInviteInput, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_admin(user["id"], group_id):
+        raise HTTPException(status_code=403, detail="Admin only for this group")
+    username = body.username.strip()
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        target = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        target_id = target["id"]
+        existing = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, target_id),
+        ).fetchone()
+        if existing and existing["status"] == "approved":
+            raise HTTPException(status_code=400, detail="User is already a member")
+        if existing:
+            conn.execute(
+                "UPDATE group_memberships SET status = 'invited', requested_by = ?, created_at = ?, approved_at = NULL WHERE group_id = ? AND user_id = ?",
+                (user["id"], now, group_id, target_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at)
+                VALUES (?, ?, 'member', 'invited', ?, ?)
+                """,
+                (group_id, target_id, user["id"], now),
+            )
+    return {"ok": True, "status": "invited", "username": username}
+
+
+@app.post("/api/groups/{group_id}/invitations/accept")
+def accept_group_invite(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        ).fetchone()
+        if not row or row["status"] != "invited":
+            raise HTTPException(status_code=404, detail="Invitation not found")
+        conn.execute(
+            "UPDATE group_memberships SET status = 'approved', approved_at = ? WHERE group_id = ? AND user_id = ?",
+            (now, group_id, user["id"]),
+        )
+    return {"ok": True, "status": "approved"}
+
+
+@app.post("/api/groups/{group_id}/invitations/reject")
+def reject_group_invite(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        ).fetchone()
+        if not row or row["status"] != "invited":
+            raise HTTPException(status_code=404, detail="Invitation not found")
+        conn.execute(
+            "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/groups/{group_id}/transfer-admin")
+def transfer_group_admin(group_id: int, body: GroupTransferAdminInput, request: Request) -> Any:
+    user = must_login(request)
+    if not _is_group_admin(user["id"], group_id):
+        raise HTTPException(status_code=403, detail="Admin only for this group")
+    new_admin_id = body.new_admin_user_id
+    with db_conn() as conn:
+        target = conn.execute(
+            "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, new_admin_id),
+        ).fetchone()
+        if not target or target["status"] != "approved":
+            raise HTTPException(status_code=400, detail="Target user must be an approved member")
+        conn.execute(
+            "UPDATE group_memberships SET role = 'member' WHERE group_id = ? AND role = 'admin'",
+            (group_id,),
+        )
+        conn.execute(
+            "UPDATE group_memberships SET role = 'admin' WHERE group_id = ? AND user_id = ?",
+            (group_id, new_admin_id),
+        )
+    return {"ok": True, "new_admin_user_id": new_admin_id}
+
+
+@app.get("/api/kb/list")
+def list_brand_kb(request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            WITH visible AS (
+                SELECT b.*, u.username AS owner_username, g.name AS share_group_name
+                FROM brand_kb_versions b
+                LEFT JOIN users u ON u.id = b.owner_id
+                LEFT JOIN groups g ON g.id = b.share_group_id
+                LEFT JOIN group_memberships gm
+                  ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+                WHERE b.owner_id = ?
+                   OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+            ),
+            latest AS (
+                SELECT kb_key, MAX(version) AS latest_version
+                FROM visible
+                GROUP BY kb_key
+            )
+            SELECT v.kb_key, v.kb_name, v.version, v.owner_id, v.owner_username, v.visibility,
+                   v.share_group_id, v.share_group_name, v.brand_voice, v.created_at,
+                   v.positioning_json, v.glossary_json, v.forbidden_words_json, v.required_terms_json,
+                   v.claims_policy_json, v.examples_json, v.notes
+            FROM visible v
+            JOIN latest l ON l.kb_key = v.kb_key AND l.latest_version = v.version
+            ORDER BY v.kb_name COLLATE NOCASE ASC, v.kb_key ASC
+            """
+            ,
+            (user["id"], user["id"]),
+        ).fetchall()
+    return [_kb_row_to_dict(r) for r in rows]
 
 
 @app.get("/api/kb/{kb_key}/versions")
 def list_brand_kb_versions(kb_key: str, request: Request) -> Any:
-    must_login(request)
+    user = must_login(request)
     key = _normalize_kb_key(kb_key)
     with db_conn() as conn:
         rows = conn.execute(
             """
-            SELECT kb_key, kb_name, version, created_at
-            FROM brand_kb_versions
-            WHERE kb_key = ?
+            SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username,
+                   b.visibility, b.share_group_id, g.name AS share_group_name, b.created_at,
+                   b.brand_voice, b.positioning_json, b.glossary_json, b.forbidden_words_json,
+                   b.required_terms_json, b.claims_policy_json, b.examples_json, b.notes
+            FROM brand_kb_versions b
+            LEFT JOIN users u ON u.id = b.owner_id
+            LEFT JOIN groups g ON g.id = b.share_group_id
+            LEFT JOIN group_memberships gm
+              ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+            WHERE b.kb_key = ?
+              AND (
+                    b.owner_id = ?
+                    OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+              )
             ORDER BY version DESC
             """,
-            (key,),
+            (user["id"], key, user["id"]),
         ).fetchall()
     if not rows:
         raise HTTPException(status_code=404, detail="KB not found")
-    return [dict(r) for r in rows]
+    return [_kb_row_to_dict(r) for r in rows]
 
 
 @app.get("/api/kb/{kb_key}")
 def get_brand_kb(kb_key: str, request: Request, version: int | None = None) -> Any:
-    must_login(request)
+    user = must_login(request)
     key = _normalize_kb_key(kb_key)
     with db_conn() as conn:
         if version is None:
             row = conn.execute(
                 """
-                SELECT kb_key, kb_name, version, brand_voice, positioning_json, glossary_json,
-                       forbidden_words_json, required_terms_json, claims_policy_json, examples_json, notes, created_at
-                FROM brand_kb_versions
-                WHERE kb_key = ?
+                SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username,
+                       b.visibility, b.share_group_id, g.name AS share_group_name,
+                       b.brand_voice, b.positioning_json, b.glossary_json,
+                       b.forbidden_words_json, b.required_terms_json,
+                       b.claims_policy_json, b.examples_json, b.notes, b.created_at
+                FROM brand_kb_versions b
+                LEFT JOIN users u ON u.id = b.owner_id
+                LEFT JOIN groups g ON g.id = b.share_group_id
+                LEFT JOIN group_memberships gm
+                  ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+                WHERE b.kb_key = ?
+                  AND (
+                        b.owner_id = ?
+                        OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+                  )
                 ORDER BY version DESC
                 LIMIT 1
                 """,
-                (key,),
+                (user["id"], key, user["id"]),
             ).fetchone()
         else:
             row = conn.execute(
                 """
-                SELECT kb_key, kb_name, version, brand_voice, positioning_json, glossary_json,
-                       forbidden_words_json, required_terms_json, claims_policy_json, examples_json, notes, created_at
-                FROM brand_kb_versions
-                WHERE kb_key = ? AND version = ?
+                SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username,
+                       b.visibility, b.share_group_id, g.name AS share_group_name,
+                       b.brand_voice, b.positioning_json, b.glossary_json,
+                       b.forbidden_words_json, b.required_terms_json,
+                       b.claims_policy_json, b.examples_json, b.notes, b.created_at
+                FROM brand_kb_versions b
+                LEFT JOIN users u ON u.id = b.owner_id
+                LEFT JOIN groups g ON g.id = b.share_group_id
+                LEFT JOIN group_memberships gm
+                  ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+                WHERE b.kb_key = ? AND b.version = ?
+                  AND (
+                        b.owner_id = ?
+                        OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+                  )
                 """,
-                (key, version),
+                (user["id"], key, version, user["id"]),
             ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="KB not found")
@@ -2985,10 +4321,11 @@ def get_brand_kb(kb_key: str, request: Request, version: int | None = None) -> A
 
 @app.post("/api/kb")
 def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
-    must_login(request)
+    user = must_login(request)
 
     kb_key = _normalize_kb_key(body.kb_key)
     kb_name = (body.kb_name or kb_key).strip() or kb_key
+    visibility, share_group_id = _validate_share_group_for_user(user["id"], body.visibility, body.share_group_id)
     brand_voice = body.brand_voice.strip() if body.brand_voice else None
     notes = body.notes.strip() if body.notes else None
     normalized = _normalize_kb_structured_fields_with_llm(
@@ -3009,15 +4346,18 @@ def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
         conn.execute(
             """
             INSERT INTO brand_kb_versions (
-                kb_key, kb_name, version, brand_voice, positioning_json, glossary_json,
+                kb_key, kb_name, version, owner_id, visibility, share_group_id, brand_voice, positioning_json, glossary_json,
                 forbidden_words_json, required_terms_json, claims_policy_json, examples_json, notes, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 kb_key,
                 kb_name[:120],
                 version,
+                user["id"],
+                visibility,
+                share_group_id,
                 brand_voice,
                 _json_dumps(normalized["positioning"]),
                 _json_dumps(normalized["glossary"]),
@@ -3031,10 +4371,14 @@ def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
         )
         row = conn.execute(
             """
-            SELECT kb_key, kb_name, version, brand_voice, positioning_json, glossary_json,
-                   forbidden_words_json, required_terms_json, claims_policy_json, examples_json, notes, created_at
-            FROM brand_kb_versions
-            WHERE kb_key = ? AND version = ?
+            SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username,
+                   b.visibility, b.share_group_id, g.name AS share_group_name,
+                   b.brand_voice, b.positioning_json, b.glossary_json,
+                   b.forbidden_words_json, b.required_terms_json, b.claims_policy_json, b.examples_json, b.notes, b.created_at
+            FROM brand_kb_versions b
+            LEFT JOIN users u ON u.id = b.owner_id
+            LEFT JOIN groups g ON g.id = b.share_group_id
+            WHERE b.kb_key = ? AND b.version = ?
             """,
             (kb_key, version),
         ).fetchone()
@@ -3043,9 +4387,24 @@ def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
 
 @app.put("/api/kb/{kb_key}/{version}")
 def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request: Request) -> Any:
-    must_login(request)
+    user = must_login(request)
     key = _normalize_kb_key(kb_key)
     kb_name = (body.kb_name or key).strip() or key
+    with db_conn() as conn:
+        existing = conn.execute(
+            "SELECT owner_id, visibility, share_group_id FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
+            (key, version),
+        ).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="KB version not found")
+    if existing["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Only owner can update this KB version")
+
+    visibility, share_group_id = _validate_share_group_for_user(
+        user["id"],
+        body.visibility or existing["visibility"] or "private",
+        body.share_group_id if body.visibility is not None else existing["share_group_id"],
+    )
     brand_voice = body.brand_voice.strip() if body.brand_voice else None
     notes = body.notes.strip() if body.notes else None
     normalized = _normalize_kb_structured_fields_with_llm(
@@ -3058,22 +4417,18 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
     )
 
     with db_conn() as conn:
-        exists = conn.execute(
-            "SELECT id FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
-            (key, version),
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="KB version not found")
         conn.execute(
             """
             UPDATE brand_kb_versions
-            SET kb_name = ?, brand_voice = ?, positioning_json = ?, glossary_json = ?,
+            SET kb_name = ?, visibility = ?, share_group_id = ?, brand_voice = ?, positioning_json = ?, glossary_json = ?,
                 forbidden_words_json = ?, required_terms_json = ?, claims_policy_json = ?,
                 examples_json = ?, notes = ?
             WHERE kb_key = ? AND version = ?
             """,
             (
                 kb_name[:120],
+                visibility,
+                share_group_id,
                 brand_voice,
                 _json_dumps(normalized["positioning"]),
                 _json_dumps(normalized["glossary"]),
@@ -3088,10 +4443,14 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
         )
         row = conn.execute(
             """
-            SELECT kb_key, kb_name, version, brand_voice, positioning_json, glossary_json,
-                   forbidden_words_json, required_terms_json, claims_policy_json, examples_json, notes, created_at
-            FROM brand_kb_versions
-            WHERE kb_key = ? AND version = ?
+            SELECT b.kb_key, b.kb_name, b.version, b.owner_id, u.username AS owner_username,
+                   b.visibility, b.share_group_id, g.name AS share_group_name,
+                   b.brand_voice, b.positioning_json, b.glossary_json,
+                   b.forbidden_words_json, b.required_terms_json, b.claims_policy_json, b.examples_json, b.notes, b.created_at
+            FROM brand_kb_versions b
+            LEFT JOIN users u ON u.id = b.owner_id
+            LEFT JOIN groups g ON g.id = b.share_group_id
+            WHERE b.kb_key = ? AND b.version = ?
             """,
             (key, version),
         ).fetchone()
@@ -3100,15 +4459,17 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
 
 @app.delete("/api/kb/{kb_key}/{version}")
 def delete_brand_kb(kb_key: str, version: int, request: Request) -> Any:
-    must_login(request)
+    user = must_login(request)
     key = _normalize_kb_key(kb_key)
     with db_conn() as conn:
         exists = conn.execute(
-            "SELECT id FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
+            "SELECT id, owner_id FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
             (key, version),
         ).fetchone()
         if not exists:
             raise HTTPException(status_code=404, detail="KB version not found")
+        if exists["owner_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Only owner can delete this KB version")
         in_use = conn.execute(
             "SELECT id FROM conversations WHERE kb_key = ? AND kb_version = ? LIMIT 1",
             (key, version),
@@ -3128,12 +4489,19 @@ def list_conversations(request: Request) -> Any:
     with db_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, title, model_id, task_mode, kb_key, kb_version, created_at, updated_at
-            FROM conversations
-            WHERE user_id = ?
-            ORDER BY updated_at DESC
+            SELECT c.id, c.user_id, c.title, c.model_id, c.task_mode, c.visibility, c.share_group_id,
+                   g.name AS share_group_name, u.username AS owner_username,
+                   c.kb_key, c.kb_version, c.created_at, c.updated_at
+            FROM conversations c
+            LEFT JOIN users u ON u.id = c.user_id
+            LEFT JOIN groups g ON g.id = c.share_group_id
+            LEFT JOIN group_memberships gm
+              ON gm.group_id = c.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+            WHERE c.user_id = ?
+               OR (c.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+            ORDER BY c.updated_at DESC
             """,
-            (user["id"],),
+            (user["id"], user["id"]),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3142,34 +4510,35 @@ def list_conversations(request: Request) -> Any:
 def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     user = must_login(request)
     task_mode = _normalize_task_mode(body.task_mode)
+    visibility, share_group_id = _validate_share_group_for_user(user["id"], body.visibility, body.share_group_id)
     default_title = "新营销任务" if task_mode == "marketing" else "新对话"
     title = (body.title or default_title).strip() or default_title
     now = now_utc().isoformat()
     model_id = DEFAULT_MODEL_ID
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO conversations (user_id, title, model_id, task_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user["id"], title[:120], model_id, task_mode, now, now),
+            """
+            INSERT INTO conversations (user_id, title, model_id, task_mode, visibility, share_group_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user["id"], title[:120], model_id, task_mode, visibility, share_group_id, now, now),
         )
         conv_id = cur.lastrowid
     return {
         "id": conv_id,
+        "user_id": user["id"],
+        "owner_username": user["username"],
         "title": title[:120],
         "model_id": model_id,
         "task_mode": task_mode,
+        "visibility": visibility,
+        "share_group_id": share_group_id,
+        "share_group_name": None,
         "kb_key": None,
         "kb_version": None,
         "created_at": now,
         "updated_at": now,
     }
-
-
-class ConversationModelInput(BaseModel):
-    model_id: str = Field(min_length=3, max_length=128)
-
-
-class ConversationTitleInput(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
 
 
 @app.delete("/api/conversations/{conversation_id}")
@@ -3247,6 +4616,30 @@ def update_conversation_mode(conversation_id: int, body: ConversationModeInput, 
     return {"ok": True, "task_mode": task_mode, "updated_at": now}
 
 
+@app.patch("/api/conversations/{conversation_id}/visibility")
+def update_conversation_visibility(conversation_id: int, body: ConversationVisibilityInput, request: Request) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    visibility, share_group_id = _validate_share_group_for_user(user["id"], body.visibility, body.share_group_id)
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE conversations SET visibility = ?, share_group_id = ?, updated_at = ? WHERE id = ?",
+            (visibility, share_group_id, now, conversation_id),
+        )
+        group_name = None
+        if share_group_id:
+            row = conn.execute("SELECT name FROM groups WHERE id = ?", (share_group_id,)).fetchone()
+            group_name = row["name"] if row else None
+    return {
+        "ok": True,
+        "visibility": visibility,
+        "share_group_id": share_group_id,
+        "share_group_name": group_name,
+        "updated_at": now,
+    }
+
+
 @app.patch("/api/conversations/{conversation_id}/kb")
 def update_conversation_kb(conversation_id: int, body: ConversationKBInput, request: Request) -> Any:
     user = must_login(request)
@@ -3264,12 +4657,28 @@ def update_conversation_kb(conversation_id: int, body: ConversationKBInput, requ
         kb_key = _normalize_kb_key(body.kb_key or "")
         kb_version = body.kb_version
         with db_conn() as conn:
-            kb_row = conn.execute(
-                "SELECT kb_name FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
+            exists = conn.execute(
+                "SELECT 1 FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
                 (kb_key, kb_version),
             ).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="KB version not found")
+            kb_row = conn.execute(
+                """
+                SELECT b.kb_name
+                FROM brand_kb_versions b
+                LEFT JOIN group_memberships gm
+                  ON gm.group_id = b.share_group_id AND gm.user_id = ? AND gm.status = 'approved'
+                WHERE b.kb_key = ? AND b.version = ?
+                  AND (
+                        b.owner_id = ?
+                        OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
+                  )
+                """,
+                (user["id"], kb_key, kb_version, user["id"]),
+            ).fetchone()
         if not kb_row:
-            raise HTTPException(status_code=404, detail="KB version not found")
+            raise HTTPException(status_code=403, detail="No access to this KB version")
         kb_name = kb_row["kb_name"]
 
     now = now_utc().isoformat()
@@ -3290,7 +4699,7 @@ def update_conversation_kb(conversation_id: int, body: ConversationKBInput, requ
 @app.get("/api/conversations/{conversation_id}/messages")
 def list_messages(conversation_id: int, request: Request) -> Any:
     user = must_login(request)
-    conversation_owner_or_404(user["id"], conversation_id)
+    conversation_visible_or_404(user["id"], conversation_id)
     with db_conn() as conn:
         rows = conn.execute(
             """
@@ -3307,7 +4716,7 @@ def list_messages(conversation_id: int, request: Request) -> Any:
 @app.get("/api/conversations/{conversation_id}/export")
 def export_conversation(conversation_id: int, request: Request) -> Any:
     user = must_login(request)
-    conversation = conversation_owner_or_404(user["id"], conversation_id)
+    conversation = conversation_visible_or_404(user["id"], conversation_id)
     with db_conn() as conn:
         messages = conn.execute(
             """
@@ -3323,8 +4732,11 @@ def export_conversation(conversation_id: int, request: Request) -> Any:
     lines = [
         f"# {conversation['title']}",
         "",
+        f"- Owner user id: {conversation['user_id']}",
         f"- Task mode: {mode}",
         f"- Model: {conversation['model_id']}",
+        f"- Visibility: {conversation['visibility'] or 'private'}",
+        f"- Share group id: {conversation['share_group_id'] if conversation['share_group_id'] is not None else 'none'}",
         f"- Exported at: {now_utc().isoformat()}",
         "",
     ]
@@ -3347,7 +4759,7 @@ def export_conversation(conversation_id: int, request: Request) -> Any:
 @app.get("/api/conversations/{conversation_id}/documents")
 def list_documents(conversation_id: int, request: Request) -> Any:
     user = must_login(request)
-    conversation_owner_or_404(user["id"], conversation_id)
+    conversation_visible_or_404(user["id"], conversation_id)
     with db_conn() as conn:
         rows = conn.execute(
             """
@@ -3432,7 +4844,7 @@ def delete_document(conversation_id: int, document_id: int, request: Request) ->
 @app.post("/api/conversations/{conversation_id}/messages")
 def send_message(conversation_id: int, body: MessageInput, request: Request) -> Any:
     user = must_login(request)
-    conversation = conversation_owner_or_404(user["id"], conversation_id)
+    conversation = conversation_visible_or_404(user["id"], conversation_id)
 
     content = body.content.strip()
     if not content:
