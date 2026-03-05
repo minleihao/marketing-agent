@@ -44,6 +44,13 @@ VALID_CHANNELS = {
     "landing_page",
     "other",
 }
+VALID_OUTPUT_SECTIONS = {"brief", "plan", "generator", "evaluation"}
+OUTPUT_SECTION_ALIASES = {
+    "assets": "generator",
+    "generated": "generator",
+    "copy": "generator",
+    "eval": "evaluation",
+}
 ORCHESTRATOR_ENABLED = os.getenv("NOVARED_ORCHESTRATOR_ENABLED", "1").strip() not in {"0", "false", "False"}
 
 _agent_cache: dict[str, Agent] = {}
@@ -227,6 +234,151 @@ def _ensure_str_list(value: Any) -> list[str]:
     return []
 
 
+def _normalize_output_sections(value: Any) -> list[str]:
+    if value is None:
+        return ["generator"]
+    raw_sections = _ensure_str_list(value)
+    if not raw_sections:
+        return ["generator"]
+    normalized: list[str] = []
+    for item in raw_sections:
+        key = item.strip().lower()
+        key = OUTPUT_SECTION_ALIASES.get(key, key)
+        if key not in VALID_OUTPUT_SECTIONS:
+            valid = ", ".join(sorted(VALID_OUTPUT_SECTIONS))
+            raise ValueError(f"`output_sections` contains unsupported value: {item}. Allowed: {valid}.")
+        if key not in normalized:
+            normalized.append(key)
+    return normalized or ["generator"]
+
+
+def _format_brief_section(brief: dict[str, Any]) -> str:
+    lines = [
+        "## Brief",
+        f"- Task type: {brief.get('task_type', 'n/a')}",
+        f"- Objective: {brief.get('objective', 'n/a')}",
+        f"- Audience: {brief.get('audience', 'n/a')}",
+        f"- Channel plan: {', '.join(brief.get('channel_plan') or ['n/a'])}",
+        f"- Success metrics: {', '.join(brief.get('success_metrics') or ['n/a'])}",
+    ]
+    constraints = brief.get("constraints") or []
+    if constraints:
+        lines.append("- Constraints:")
+        lines.extend([f"  - {item}" for item in constraints])
+    missing = brief.get("missing_info") or []
+    if missing:
+        lines.append("- Missing info:")
+        lines.extend([f"  - {item}" for item in missing])
+    assumptions = brief.get("assumptions") or []
+    if assumptions:
+        lines.append("- Assumptions:")
+        lines.extend([f"  - {item}" for item in assumptions])
+    return "\n".join(lines)
+
+
+def _format_plan_section(plan: dict[str, Any]) -> str:
+    strategy = plan.get("strategy") or {}
+    lines = [
+        "## Plan",
+        "### Strategy",
+        f"- Positioning angle: {strategy.get('positioning_angle', 'n/a')}",
+        f"- Funnel stage: {strategy.get('funnel_stage', 'n/a')}",
+        f"- Offer strategy: {strategy.get('offer_strategy', 'n/a')}",
+    ]
+    pillars = strategy.get("message_pillars") or []
+    if pillars:
+        lines.append("- Message pillars:")
+        lines.extend([f"  - {item}" for item in pillars])
+
+    channel_execution = plan.get("channel_execution") or []
+    if channel_execution:
+        lines.append("### Channel Execution")
+        for item in channel_execution:
+            if not isinstance(item, dict):
+                continue
+            channel = item.get("channel", "n/a")
+            asset_types = ", ".join(item.get("asset_types") or ["n/a"])
+            execution_notes = item.get("execution_notes", "n/a")
+            primary_kpi = item.get("primary_kpi", "n/a")
+            lines.append(f"- {channel}: assets={asset_types}; primary KPI={primary_kpi}")
+            lines.append(f"  - Notes: {execution_notes}")
+
+    experiments = plan.get("experiment_matrix") or []
+    if experiments:
+        lines.append("### Experiment Matrix")
+        for item in experiments:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {item.get('name', 'Experiment')}: {item.get('variant_a', 'A')} vs {item.get('variant_b', 'B')} "
+                f"(expected impact: {item.get('expected_impact', 'n/a')})"
+            )
+
+    risks = plan.get("risks_and_mitigations") or []
+    if risks:
+        lines.append("### Risks & Mitigations")
+        for item in risks:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- Risk: {item.get('risk', 'n/a')}")
+            lines.append(f"  - Mitigation: {item.get('mitigation', 'n/a')}")
+    return "\n".join(lines)
+
+
+def _format_evaluation_section(evaluation: dict[str, Any]) -> str:
+    scores = evaluation.get("scores") or {}
+    lines = [
+        "## Evaluator",
+        f"- Overall verdict: {evaluation.get('overall_verdict', 'n/a')}",
+        "### Scores",
+        f"- Brand consistency: {scores.get('brand_consistency', 'n/a')}/100",
+        f"- Clarity: {scores.get('clarity', 'n/a')}/100",
+        f"- Conversion potential: {scores.get('conversion_potential', 'n/a')}/100",
+        f"- Compliance risk: {scores.get('compliance_risk', 'n/a')}/100",
+    ]
+    reasons = evaluation.get("reasons") or []
+    if reasons:
+        lines.append("### Reasons")
+        for item in reasons:
+            if not isinstance(item, dict):
+                continue
+            dimension = item.get("dimension", "general")
+            reason = item.get("reason", "")
+            evidence = item.get("evidence", "")
+            evidence_block = f" (evidence: {evidence})" if evidence else ""
+            lines.append(f"- [{dimension}] {reason}{evidence_block}")
+    required_revisions = evaluation.get("required_revisions") or []
+    if required_revisions:
+        lines.append("### Required Revisions")
+        lines.extend([f"- {item}" for item in required_revisions])
+    flagged_claims = evaluation.get("flagged_claims") or []
+    if flagged_claims:
+        lines.append("### Flagged Claims")
+        lines.extend([f"- {item}" for item in flagged_claims])
+    return "\n".join(lines)
+
+
+def _compose_orchestrator_message(orchestrator_payload: dict[str, Any], output_sections: list[str]) -> str:
+    if output_sections == ["generator"]:
+        return str(orchestrator_payload.get("generated_output", "")).strip()
+
+    blocks: list[str] = []
+    for section in output_sections:
+        if section == "brief":
+            blocks.append(_format_brief_section(orchestrator_payload.get("brief") or {}))
+        elif section == "plan":
+            blocks.append(_format_plan_section(orchestrator_payload.get("plan") or {}))
+        elif section == "generator":
+            generated_output = str(orchestrator_payload.get("generated_output", "")).strip()
+            if generated_output:
+                blocks.append("## Marketing Content\n" + generated_output)
+        elif section == "evaluation":
+            blocks.append(_format_evaluation_section(orchestrator_payload.get("evaluation") or {}))
+
+    combined = "\n\n---\n\n".join([block for block in blocks if block.strip()])
+    return combined.strip() or str(orchestrator_payload.get("generated_output", "")).strip()
+
+
 def _normalize_experiment_hypothesis(item: Any) -> dict[str, str]:
     if not isinstance(item, dict):
         return {
@@ -301,7 +453,7 @@ def _normalize_planner_json(candidate: Any, *, brief: dict[str, Any]) -> dict[st
             {
                 "channel": channel,
                 "asset_types": ["primary_copy", "headline", "cta"],
-                "distribution_notes": "Use audience-fit targeting and frequency control",
+                "execution_notes": "Manual execution guidance: align message and targeting to audience intent",
                 "primary_kpi": (brief.get("success_metrics") or ["CTR"])[0],
             }
             for channel in (brief.get("channel_plan") or ["general"])
@@ -333,8 +485,10 @@ def _normalize_planner_json(candidate: Any, *, brief: dict[str, Any]) -> dict[st
             {
                 "channel": str(item.get("channel", "general")).strip() or "general",
                 "asset_types": _ensure_str_list(item.get("asset_types")) or ["primary_copy"],
-                "distribution_notes": str(item.get("distribution_notes", "")).strip()
-                or "Align message and targeting to audience intent",
+                # Backward compatible: accept legacy distribution_notes, normalize to execution_notes.
+                "execution_notes": str(item.get("execution_notes", "")).strip()
+                or str(item.get("distribution_notes", "")).strip()
+                or "Manual execution guidance: align message and targeting to audience intent",
                 "primary_kpi": str(item.get("primary_kpi", "CTR")).strip() or "CTR",
             }
         )
@@ -507,7 +661,8 @@ def invoke(payload: Dict[str, Any]):
          "audience": "<who we are targeting>",
          "objective": "<lead gen | sign-up | brand awareness | event registration | etc.>",
          "brand_voice": "<tone description>",
-         "extra_requirements": "<additional constraints or instructions>"
+         "extra_requirements": "<additional constraints or instructions>",
+         "output_sections": ["brief", "plan", "generator", "evaluation"]
       }
     }
     """
@@ -530,6 +685,7 @@ def invoke(payload: Dict[str, Any]):
         model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
         model_id = _normalize_model_id(model_id)
         include_trace = bool(marketing_context.get("include_trace", False))
+        output_sections = _normalize_output_sections(marketing_context.get("output_sections"))
 
         if channel and channel.lower() not in VALID_CHANNELS:
             valid = ", ".join(sorted(VALID_CHANNELS))
@@ -562,7 +718,7 @@ def invoke(payload: Dict[str, Any]):
                     extra=extra,
                     language_rules=language_rules,
                 )
-                message = orchestrator_payload["generated_output"]
+                message = _compose_orchestrator_message(orchestrator_payload, output_sections)
             else:
                 final_prompt = marketing_prompt(
                     user_prompt=user_prompt,
@@ -577,7 +733,11 @@ def invoke(payload: Dict[str, Any]):
                 result = agent(final_prompt)
                 message = _extract_message_text(result)
         else:
-            final_prompt = chat_prompt(user_prompt=user_prompt, language_rules=language_rules)
+            final_prompt = chat_prompt(
+                user_prompt=user_prompt,
+                language_rules=language_rules,
+                context_block=extra,
+            )
             result = agent(final_prompt)
             message = _extract_message_text(result)
 

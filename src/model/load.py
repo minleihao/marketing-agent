@@ -1,12 +1,13 @@
 from strands.models import BedrockModel
 
-DEFAULT_MODEL_ID = "us.amazon.nova-micro-v1:0"
+DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
+DEFAULT_MAX_TOKENS = 8192
 
 
 def load_model(model_id: str = DEFAULT_MODEL_ID):
     kwargs = {
         "model_id": model_id,
-        "max_tokens": 2048,
+        "max_tokens": DEFAULT_MAX_TOKENS,
         "temperature": 0.7,
         "top_p": 0.9,
     }

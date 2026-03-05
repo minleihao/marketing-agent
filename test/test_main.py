@@ -51,6 +51,30 @@ def test_invoke_without_structured_context_uses_general_prompt(monkeypatch):
 
     assert result == {"result": "general answer"}
     assert "The user is asking for help related to marketing." in captured["prompt"]
+    assert "Assume the product and campaign are primarily designed for US-centered customers." in captured["prompt"]
+
+
+def test_invoke_chat_mode_includes_context_block(monkeypatch):
+    captured = {}
+
+    def fake_agent(prompt: str):
+        captured["prompt"] = prompt
+        return SimpleNamespace(message="context-aware answer")
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: fake_agent)
+
+    result = main.invoke(
+        {
+            "prompt": "continue",
+            "tool_args": {
+                "extra_requirements": "Recent conversation context:\n- User: We target SMB founders\n- Assistant: Focus on LinkedIn\n\nShared brand knowledge context:\n- Brand voice: concise",
+            },
+        }
+    )
+
+    assert result == {"result": "context-aware answer"}
+    assert "Conversation context from previous turns and attached sources:" in captured["prompt"]
+    assert "We target SMB founders" in captured["prompt"]
 
 
 def test_invoke_uses_selected_model(monkeypatch):
@@ -232,3 +256,73 @@ def test_invoke_returns_orchestrator_trace_when_include_trace_enabled(monkeypatc
     assert result["orchestrator"]["brief"]["task_type"] == "campaign planning"
     assert result["orchestrator"]["plan"]["strategy"]["positioning_angle"] == "Outcome-first"
     assert result["orchestrator"]["evaluation"]["overall_verdict"] == "pass"
+
+
+def test_invoke_supports_output_sections_brief_only(monkeypatch):
+    outputs = iter(
+        [
+            SimpleNamespace(
+                message=(
+                    '{"task_type":"campaign planning","objective":"trial signup","audience":"SMB founders",'
+                    '"channel_plan":["email"],"constraints":["brand","legal","format"],'
+                    '"missing_info":[],"assumptions":["assume baseline"],"success_metrics":["CTR","CVR","CPL"],'
+                    '"experiment_hypotheses":[{"name":"Hook test","variant_a":"A","variant_b":"B","expected_impact":"CTR lift"}]}'
+                )
+            ),
+            SimpleNamespace(
+                message=(
+                    '{"strategy":{"positioning_angle":"Outcome-first","message_pillars":["p1","p2","p3"],'
+                    '"funnel_stage":"mid_funnel","offer_strategy":"free_trial"},'
+                    '"channel_execution":[{"channel":"email","asset_types":["copy"],"distribution_notes":"notes","primary_kpi":"CTR"}],'
+                    '"experiment_matrix":[{"name":"Hook test","variant_a":"A","variant_b":"B","expected_impact":"CTR lift"}],'
+                    '"risks_and_mitigations":[{"risk":"claim risk","mitigation":"use evidence"}]}'
+                )
+            ),
+            SimpleNamespace(message="Generated campaign copy"),
+            SimpleNamespace(
+                message=(
+                    '{"scores":{"brand_consistency":88,"clarity":90,"conversion_potential":84,"compliance_risk":20},'
+                    '"overall_verdict":"pass","reasons":[{"dimension":"clarity","score":90,"reason":"clear","evidence":"structured"}],'
+                    '"required_revisions":[],"approved_claims":["claim a"],"flagged_claims":[]}'
+                )
+            ),
+        ]
+    )
+
+    def fake_agent(_prompt: str):
+        return next(outputs)
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: fake_agent)
+
+    result = main.invoke(
+        {
+            "prompt": "Generate launch copy",
+            "tool_args": {
+                "channel": "email",
+                "product": "Acme AI",
+                "audience": "SMB founders",
+                "objective": "trial signup",
+                "output_sections": ["brief"],
+            },
+        }
+    )
+
+    assert "## Brief" in result["result"]
+    assert "## Plan" not in result["result"]
+    assert "## Evaluator" not in result["result"]
+    assert "Generated campaign copy" not in result["result"]
+
+
+def test_invoke_rejects_invalid_output_section():
+    result = main.invoke(
+        {
+            "prompt": "Generate launch copy",
+            "tool_args": {
+                "channel": "email",
+                "output_sections": ["not_supported"],
+            },
+        }
+    )
+
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert "`output_sections` contains unsupported value" in result["error"]["message"]

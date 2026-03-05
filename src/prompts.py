@@ -12,12 +12,21 @@ Operating principles:
 - Prioritize claims that are defensible; avoid exaggerated or unverifiable statements.
 - If the request is ambiguous, ask exactly one clarifying question before drafting.
 - Respect brand voice. If not provided, default to "professional, concise, and friendly".
+- Do not claim that you can auto-publish, auto-distribute, or directly execute actions on external marketing channels.
+- All channel actions must be presented as manual steps for users to execute.
 
 Quality bar for all outputs:
 - Start with concise assumptions when key context is missing.
 - Provide concrete recommendations, not generic advice.
 - Use structured Markdown that is easy to copy into marketing tools.
 - When useful, include test ideas, KPI implications, and likely trade-offs.
+""".strip()
+
+US_MARKET_DEFAULT_PRESET = """
+Default market preset:
+- Assume the product and campaign are primarily designed for US-centered customers.
+- Prefer US market context, US English usage, and practical US-facing guidance.
+- If the user explicitly requests a different geography, override this default and follow the user's specified region.
 """.strip()
 
 
@@ -58,6 +67,8 @@ def brief_normalizer_prompt(
 You are Marketing Orchestrator. Do not write marketing copy in this step.
 Normalize user intent into strict executable JSON only.
 
+{US_MARKET_DEFAULT_PRESET}
+
 Known inputs:
 - Channel: {channel or "unspecified"}
 - Product: {product or "unspecified"}
@@ -96,6 +107,7 @@ You are a marketing strategist planner.
 Do not write final copy in this step.
 
 {language_rules}
+{US_MARKET_DEFAULT_PRESET}
 
 Input normalized brief JSON:
 {normalized_brief_json}
@@ -109,7 +121,7 @@ Output JSON only with this schema:
     "offer_strategy": "..."
   }},
   "channel_execution": [
-    {{"channel":"...","asset_types":["..."],"distribution_notes":"...","primary_kpi":"..."}}
+    {{"channel":"...","asset_types":["..."],"execution_notes":"...","primary_kpi":"..."}}
   ],
   "experiment_matrix": [
     {{"name":"...","variable":"...","variant_a":"...","variant_b":"...","measurement":"...","expected_impact":"..."}}
@@ -118,6 +130,10 @@ Output JSON only with this schema:
     {{"risk":"...","mitigation":"..."}}
   ]
 }}
+
+Rules:
+- The plan must not imply direct API execution or automatic publishing/distribution.
+- Use execution_notes as manual operating guidance only.
 """.strip()
 
 
@@ -132,6 +148,7 @@ def generator_prompt(
 You are the Generator stage of a marketing orchestration pipeline.
 
 {language_rules}
+{US_MARKET_DEFAULT_PRESET}
 
 You must produce execution-ready assets using the plan.
 Campaign inputs:
@@ -144,7 +161,7 @@ Output requirements:
 2) Channel-specific assets with at least 2 variants per channel
 3) Reusable variable slots (e.g., {{PRODUCT_NAME}}, {{CTA_URL}}, {{AUDIENCE_SEGMENT}})
 4) CTA suggestions
-5) Deployment checklist
+5) Manual execution checklist (no automatic publishing/distribution claims)
 
 Formatting:
 - Use clear markdown headings.
@@ -167,6 +184,7 @@ def evaluator_prompt(
 You are the Evaluator stage. Evaluate quality and risk with traceable reasons.
 
 {language_rules}
+{US_MARKET_DEFAULT_PRESET}
 
 Campaign inputs:
 - Channel: {channel or "unspecified"}
@@ -213,6 +231,7 @@ def marketing_prompt(
 You are helping the marketing team craft channel-specific copy.
 
 {language_rules}
+{US_MARKET_DEFAULT_PRESET}
 
 Campaign inputs:
 - Channel: {channel or "unspecified"}
@@ -227,7 +246,7 @@ Deliver a professional, decision-ready output with this structure:
 1) Strategic framing (brief):
    - Audience pain point and buying motivation.
    - Core value proposition and proof angle.
-   - Channel-specific distribution logic.
+   - Channel-specific manual execution logic.
 2) Messaging pillars:
    - 3 concise message pillars aligned to the objective.
 3) Copy options (2-3 variants):
@@ -252,11 +271,24 @@ User's free-form instructions or additional context:
 """.strip()
 
 
-def chat_prompt(*, user_prompt: str, language_rules: str) -> str:
+def chat_prompt(*, user_prompt: str, language_rules: str, context_block: str = "") -> str:
+    context_section = ""
+    if context_block.strip():
+        context_section = f"""
+Conversation context from previous turns and attached sources:
+{context_block}
+
+Context rules:
+- Use this context to maintain continuity and avoid repeating already-set facts.
+- If context conflicts with the user's latest message, prioritize the latest message and briefly note the conflict.
+"""
+
     return f"""
 The user is asking for help related to marketing.
 
 {language_rules}
+{US_MARKET_DEFAULT_PRESET}
+{context_section}
 
 Task approach:
 1) Identify the task type (copywriting, campaign strategy, performance analysis, experimentation, positioning, etc.).

@@ -62,12 +62,13 @@ LOGIN_RATE_LIMIT_MAX_FAILURES = 8
 COOKIE_SECURE = os.getenv("NOVARED_COOKIE_SECURE", "0").strip() in {"1", "true", "True"}
 
 SUPPORTED_MODELS = [
+    "us.anthropic.claude-sonnet-4-6",
     "us.amazon.nova-micro-v1:0",
     "us.amazon.nova-lite-v1:0",
     "us.amazon.nova-pro-v1:0",
-    "us.anthropic.claude-sonnet-4-6",
 ]
 TASK_MODES = {"chat", "marketing"}
+DEFAULT_CONVERSATION_TITLES = {"新对话", "新营销任务", "New Chat", "New Marketing Task"}
 VISIBILITY_LEVELS = {"private", "task", "company"}
 GROUP_TYPES = {"task", "company"}
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".log", ".py", ".html", ".xml", ".yaml", ".yml"}
@@ -133,7 +134,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
-                model_id TEXT NOT NULL DEFAULT 'us.amazon.nova-micro-v1:0',
+                model_id TEXT NOT NULL DEFAULT 'us.anthropic.claude-sonnet-4-6',
                 task_mode TEXT NOT NULL DEFAULT 'chat',
                 visibility TEXT NOT NULL DEFAULT 'private',
                 share_group_id INTEGER,
@@ -809,6 +810,10 @@ def _normalize_task_mode(raw: str | None) -> str:
     return mode
 
 
+def _is_default_conversation_title(title: str | None) -> bool:
+    return (title or "").strip() in DEFAULT_CONVERSATION_TITLES
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -1080,6 +1085,7 @@ class LoginInput(BaseModel):
 class ConversationCreateInput(BaseModel):
     title: str | None = None
     task_mode: str | None = None
+    ui_language: str | None = None
     visibility: str | None = "private"
     share_group_id: int | None = None
 
@@ -1087,6 +1093,7 @@ class ConversationCreateInput(BaseModel):
 class MessageInput(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
     ui_language: str | None = None
+    output_sections: list[str] | None = None
     channel: str | None = None
     product: str | None = None
     audience: str | None = None
@@ -1175,6 +1182,12 @@ class ExperimentVariantInput(BaseModel):
 class ExperimentStatusInput(BaseModel):
     status: str = Field(min_length=1, max_length=40)
     result: Any = Field(default_factory=dict)
+
+
+class ExperimentUpdateInput(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    hypothesis: str | None = Field(default=None, min_length=1, max_length=2000)
+    traffic_allocation: Any | None = None
 
 
 class BrandKBUpdateInput(BaseModel):
@@ -1601,7 +1614,7 @@ APP_HTML = """
 
     .main {
       display:grid;
-      grid-template-rows:auto 1fr auto;
+      grid-template-rows:auto 1fr auto auto;
       border:1px solid var(--line);
       border-radius:24px;
       background:var(--pane);
@@ -1680,12 +1693,208 @@ APP_HTML = """
       border-radius:16px;
       padding:10px 12px;
       line-height:1.58;
-      white-space:pre-wrap;
+      white-space:normal;
       box-shadow:0 10px 20px rgba(12,26,48,.06);
       animation:riseIn .2s ease;
     }
     .msg.user { background:var(--user); align-self:flex-end; border-color:#bfe6cf; }
     .msg.assistant { background:var(--bot); align-self:flex-start; border-color:#c9daf3; }
+    .msg-content { font-size:15px; line-height:1.62; color:var(--txt); }
+    .msg-content p { margin:0 0 10px; }
+    .msg-content p:last-child { margin-bottom:0; }
+    .msg-content h1, .msg-content h2, .msg-content h3, .msg-content h4 {
+      margin:4px 0 10px;
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      line-height:1.35;
+    }
+    .msg-content h1 { font-size:22px; }
+    .msg-content h2 { font-size:19px; }
+    .msg-content h3 { font-size:17px; }
+    .msg-content h4 { font-size:15px; }
+    .msg-content ul, .msg-content ol { margin:0 0 10px 18px; padding:0; }
+    .msg-content li { margin:3px 0; }
+    .msg-content blockquote {
+      margin:8px 0 12px;
+      padding:8px 12px;
+      border-left:3px solid #8eb6ef;
+      background:#f5f9ff;
+      border-radius:8px;
+    }
+    .msg-content blockquote p { margin:0; }
+    .msg-content hr {
+      border:0;
+      border-top:1px solid #cfd9ea;
+      margin:12px 0;
+    }
+    .msg-content code {
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      font-size:12px;
+      background:#eef4ff;
+      border:1px solid #d8e4f7;
+      border-radius:6px;
+      padding:1px 4px;
+    }
+    .msg-content pre {
+      margin:8px 0 12px;
+      padding:10px;
+      border:1px solid #d6dfec;
+      border-radius:10px;
+      background:#f8fbff;
+      overflow:auto;
+    }
+    .msg-content pre code {
+      border:0;
+      background:transparent;
+      padding:0;
+      font-size:12px;
+      line-height:1.55;
+      white-space:pre;
+    }
+    .msg-content table {
+      width:100%;
+      border-collapse:collapse;
+      margin:8px 0 12px;
+      background:#fff;
+      border:1px solid #d6dfec;
+      border-radius:8px;
+      overflow:hidden;
+      display:block;
+      overflow-x:auto;
+    }
+    .msg-content thead tr { background:#f4f8ff; }
+    .msg-content th, .msg-content td {
+      border:1px solid #d6dfec;
+      padding:8px 10px;
+      text-align:left;
+      vertical-align:top;
+      min-width:120px;
+      white-space:normal;
+      font-size:13px;
+    }
+    .msg-content strong { font-weight:700; }
+    .msg-content em { font-style:italic; }
+    .msg-content a { color:#0a67d3; text-decoration:none; border-bottom:1px dashed #86b6ec; }
+    .msg-content a:hover { border-bottom-style:solid; }
+    .trace-panel {
+      border-top:1px solid var(--line);
+      background:rgba(255,255,255,.92);
+      padding:8px 10px;
+      max-height:34vh;
+      overflow:auto;
+    }
+    .trace-panel.hidden { display:none; }
+    .trace-panel.compact {
+      max-height:58px;
+      overflow:hidden;
+    }
+    .trace-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:8px;
+      margin-bottom:8px;
+    }
+    .trace-head strong {
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:13px;
+    }
+    .trace-tools {
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:wrap;
+    }
+    .trace-tools label {
+      font-size:11px;
+      color:var(--muted);
+    }
+    .trace-tools .btn {
+      padding:5px 8px;
+      font-size:11px;
+    }
+    .trace-tools select {
+      width:auto;
+      min-width:180px;
+      height:30px;
+      padding:4px 8px;
+      font-size:12px;
+    }
+    .trace-body.hidden { display:none; }
+    .trace-empty {
+      border:1px dashed var(--line-strong);
+      border-radius:10px;
+      padding:8px;
+      color:var(--muted);
+      font-size:12px;
+      background:#f9fbfe;
+    }
+    .trace-grid {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px;
+      margin-top:8px;
+    }
+    .trace-grid.hidden { display:none; }
+    .trace-stage {
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:8px;
+      background:#fff;
+    }
+    .trace-stage h4 {
+      margin:0 0 6px;
+      font-size:12px;
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+    }
+    .trace-line {
+      font-size:12px;
+      color:var(--txt);
+      margin-bottom:4px;
+    }
+    .trace-line .k {
+      color:var(--muted);
+      margin-right:4px;
+    }
+    .trace-story {
+      font-size:12px;
+      line-height:1.55;
+      color:var(--txt);
+      background:#f9fcff;
+      border:1px solid #e2ebf7;
+      border-radius:8px;
+      padding:7px 8px;
+      margin-top:6px;
+      white-space:pre-wrap;
+    }
+    .trace-stage.full { grid-column:1 / -1; }
+    .trace-bullets {
+      margin:6px 0 0;
+      padding-left:16px;
+      font-size:12px;
+      line-height:1.5;
+      color:var(--txt);
+    }
+    .score-grid {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:6px;
+      margin-top:6px;
+    }
+    .score-item {
+      border:1px solid var(--line);
+      border-radius:8px;
+      padding:6px;
+      background:#f9fcff;
+      font-size:12px;
+    }
+    .score-item .k { color:var(--muted); font-size:11px; }
+    .score-item .v { font-weight:700; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+    .reason-list {
+      margin:6px 0 0;
+      padding-left:16px;
+      font-size:12px;
+      color:var(--txt);
+    }
     .composer {
       border-top:1px solid var(--line);
       background:rgba(255,255,255,.92);
@@ -1693,6 +1902,27 @@ APP_HTML = """
       max-height:34vh;
       overflow:auto;
     }
+    .composer.compact {
+      max-height:56px;
+      overflow:hidden;
+    }
+    .composer-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:8px;
+      margin-bottom:6px;
+    }
+    .composer-head strong {
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:13px;
+    }
+    .composer-head .btn {
+      width:auto;
+      padding:5px 8px;
+      font-size:11px;
+    }
+    .composer-content.hidden { display:none; }
     textarea, input, select {
       width:100%;
       border:1px solid var(--line);
@@ -1717,6 +1947,30 @@ APP_HTML = """
     .brief-grid .full { grid-column:1 / -1; }
     .brief-grid label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
     .brief-grid textarea { min-height:58px; }
+    .output-sections {
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px;
+      margin-top:4px;
+    }
+    .output-option {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:#fff;
+      padding:5px 10px;
+      font-size:12px;
+      color:var(--txt);
+      cursor:pointer;
+      user-select:none;
+    }
+    .output-option input {
+      width:auto;
+      margin:0;
+      accent-color:var(--accent);
+    }
     .action { margin-top:6px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
     .upload { margin-top:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
     .upload label { font-size:12px; color:var(--muted); }
@@ -1791,6 +2045,8 @@ APP_HTML = """
       .action .btn { width:100%; }
       input[type="file"] { width:100%; max-width:none; }
       .composer { max-height:40vh; }
+      .trace-grid { grid-template-columns:1fr; }
+      .trace-tools select { min-width:120px; width:100%; }
     }
   </style>
 </head>
@@ -1805,6 +2061,7 @@ APP_HTML = """
         </div>
         <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
         <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
+        <button class="btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button class="btn" onclick="changePassword()" data-i18n="change_password">修改密码</button>
         <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
         <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
@@ -1854,6 +2111,7 @@ APP_HTML = """
             <div class="head-actions">
               <button class="btn" onclick="saveConversationVisibility()" data-i18n="save_visibility">保存权限</button>
               <button class="btn" onclick="exportConversation()" data-i18n="export_chat">导出聊天</button>
+              <button class="btn" onclick="toggleTracePanel()" id="toggle-trace-btn">编排轨迹</button>
               <button class="btn" onclick="renameConversation()" data-i18n="rename_chat">重命名</button>
               <button class="btn" onclick="deleteConversation()" data-i18n="delete_chat">删除聊天</button>
             </div>
@@ -1862,7 +2120,58 @@ APP_HTML = """
 
         <div class="messages" id="messages"></div>
 
-        <div class="composer">
+        <div class="trace-panel hidden" id="trace-panel">
+          <div class="trace-head">
+            <strong data-i18n="trace_title">编排轨迹</strong>
+            <div class="trace-tools">
+              <label for="trace-run-select" data-i18n="trace_run_label">记录</label>
+              <select id="trace-run-select" onchange="onTraceRunChange()"></select>
+              <button class="btn" type="button" id="toggle-trace-content-btn" onclick="toggleTraceCompact()">收起</button>
+            </div>
+          </div>
+          <div class="trace-body" id="trace-body">
+            <div class="trace-empty" id="trace-empty"></div>
+            <div class="trace-grid hidden" id="trace-grid">
+              <section class="trace-stage">
+                <h4 data-i18n="trace_stage_brief">BriefNormalizer</h4>
+                <div class="trace-story" id="trace-brief-story"></div>
+                <div class="trace-line"><span class="k" data-i18n="trace_constraints">约束</span></div>
+                <ul class="trace-bullets" id="trace-brief-constraints-list"></ul>
+                <div class="trace-line"><span class="k" data-i18n="trace_missing">缺失字段</span></div>
+                <ul class="trace-bullets" id="trace-brief-missing-list"></ul>
+                <div class="trace-line"><span class="k" data-i18n="trace_assumptions">可执行假设</span></div>
+                <ul class="trace-bullets" id="trace-brief-assumptions-list"></ul>
+              </section>
+
+              <section class="trace-stage">
+                <h4 data-i18n="trace_stage_plan">Planner</h4>
+                <div class="trace-story" id="trace-plan-story"></div>
+                <div class="trace-line"><span class="k" data-i18n="trace_experiment_matrix">实验矩阵</span></div>
+                <ul class="trace-bullets" id="trace-plan-experiments-list"></ul>
+              </section>
+
+              <section class="trace-stage full">
+                <h4 data-i18n="trace_stage_generator">Generator</h4>
+                <div class="trace-story" id="trace-generator-story"></div>
+              </section>
+
+              <section class="trace-stage full">
+                <h4 data-i18n="trace_stage_eval">Evaluator</h4>
+                <div class="trace-story" id="trace-eval-story"></div>
+                <div class="score-grid" id="trace-eval-scores"></div>
+                <div class="trace-line"><span class="k" data-i18n="trace_reasons">可追踪理由</span></div>
+                <ol class="reason-list" id="trace-eval-reasons"></ol>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer" id="composer">
+        <div class="composer-head">
+          <strong data-i18n="composer_title">输入区</strong>
+          <button class="btn" type="button" id="toggle-composer-btn" onclick="toggleComposer()">收起</button>
+        </div>
+        <div class="composer-content" id="composer-content">
         <div class="brief-card hidden" id="marketing-brief">
           <div class="brief-grid">
             <div>
@@ -1901,6 +2210,28 @@ APP_HTML = """
               <label for="brief-extra" data-i18n="brief_extra_requirements">Extra Requirements</label>
               <textarea id="brief-extra"></textarea>
             </div>
+            <div class="full">
+              <label data-i18n="output_sections_label">输出内容模块</label>
+              <div class="output-sections" id="output-sections">
+                <label class="output-option">
+                  <input type="checkbox" value="brief" />
+                  <span data-i18n="output_section_brief">Brief</span>
+                </label>
+                <label class="output-option">
+                  <input type="checkbox" value="plan" />
+                  <span data-i18n="output_section_plan">Plan</span>
+                </label>
+                <label class="output-option">
+                  <input type="checkbox" value="generator" checked />
+                  <span data-i18n="output_section_generator">Marketing Content</span>
+                </label>
+                <label class="output-option">
+                  <input type="checkbox" value="evaluation" />
+                  <span data-i18n="output_section_evaluation">Evaluation</span>
+                </label>
+              </div>
+              <div class="hint" data-i18n="output_sections_hint">可多选；不选时默认返回生成内容。</div>
+            </div>
           </div>
         </div>
         <label for="input" data-i18n="brief_prompt" style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px;">Prompt</label>
@@ -1916,6 +2247,7 @@ APP_HTML = """
             <span class="hint" data-i18n="hint">每个用户仅能访问自己的会话和消息。</span>
             <button class="btn accent" onclick="sendMessage()" data-i18n="send">发送</button>
           </div>
+        </div>
         </div>
       </section>
     </div>
@@ -1938,6 +2270,7 @@ const I18N = {
     kb_create: '新建KB版本',
     kb_mgmt: 'KB 管理',
     group_mgmt: '组管理',
+    experiments_nav: '实验中心',
     change_password: '修改密码',
     force_change_password: '为了安全，请先修改默认密码。',
     old_password_prompt: '请输入当前密码',
@@ -1951,6 +2284,12 @@ const I18N = {
     brief_audience: '受众',
     brief_objective: '目标',
     brief_extra_requirements: '额外要求',
+    output_sections_label: '输出内容模块',
+    output_sections_hint: '可多选；不选时默认返回生成内容。',
+    output_section_brief: 'Brief（需求归一化）',
+    output_section_plan: 'Plan（策略与实验）',
+    output_section_generator: 'Marketing Content（生成内容）',
+    output_section_evaluation: 'Evaluator（评分与风险）',
     mode_chat: '普通聊天',
     mode_marketing: '营销任务',
     visibility_label: '可见范围',
@@ -1995,6 +2334,46 @@ const I18N = {
     conversations_empty: '还没有会话，点击上方按钮开始。',
     messages_empty: '从这里开始和 Agent 对话。',
     documents_empty: '暂无上传文档。',
+    trace_show: '显示编排轨迹',
+    trace_hide: '隐藏编排轨迹',
+    trace_compact_hide: '收起',
+    trace_compact_show: '展开',
+    trace_title: '编排轨迹',
+    trace_run_label: '记录',
+    trace_empty: '暂无可展示的编排记录。',
+    trace_stage_brief: 'BriefNormalizer',
+    trace_stage_plan: 'Planner',
+    trace_stage_generator: 'Generator',
+    trace_stage_eval: 'Evaluator',
+    trace_objective: '目标',
+    trace_audience: '受众',
+    trace_constraints: '约束',
+    trace_missing: '缺失字段',
+    trace_assumptions: '可执行假设',
+    trace_strategy: '策略',
+    trace_experiment_matrix: '实验矩阵',
+    trace_generator_output: '生成资产',
+    trace_reasons: '可追踪理由',
+    trace_verdict: '综合结论',
+    trace_verdict_pass: '通过',
+    trace_verdict_needs_revision: '需修改',
+    trace_generator_preview: '以下是本次生成结果摘要：',
+    trace_brief_sentence_prefix: '这次任务将聚焦于',
+    trace_for_audience: '面向',
+    trace_channels: '覆盖渠道',
+    trace_strategy_sentence_prefix: '策略将采用',
+    trace_pillars: '核心信息支柱',
+    trace_funnel_stage: '漏斗阶段',
+    trace_offer: '报价/利益点策略',
+    trace_expected_impact: '预期影响',
+    composer_title: '输入区',
+    composer_hide: '收起',
+    composer_show: '展开',
+    score_brand: '品牌一致性',
+    score_clarity: '清晰度',
+    score_conversion: '转化潜力',
+    score_compliance: '合规风险',
+    trace_na: '无',
     shared_from: '共享自',
     no_group_needed: '无需组',
     choose_group: '请选择组'
@@ -2014,6 +2393,7 @@ const I18N = {
     kb_create: 'New KB Version',
     kb_mgmt: 'KB Management',
     group_mgmt: 'Group Management',
+    experiments_nav: 'Experiments',
     change_password: 'Change Password',
     force_change_password: 'For security, please change your default password first.',
     old_password_prompt: 'Enter current password',
@@ -2027,6 +2407,12 @@ const I18N = {
     brief_audience: 'Audience',
     brief_objective: 'Objective',
     brief_extra_requirements: 'Extra Requirements',
+    output_sections_label: 'Output Sections',
+    output_sections_hint: 'Select one or more sections. If none is selected, marketing content is returned by default.',
+    output_section_brief: 'Brief',
+    output_section_plan: 'Plan',
+    output_section_generator: 'Marketing Content',
+    output_section_evaluation: 'Evaluation',
     mode_chat: 'Chat',
     mode_marketing: 'Marketing',
     visibility_label: 'Visibility',
@@ -2071,6 +2457,46 @@ const I18N = {
     conversations_empty: 'No conversations yet. Start one from above.',
     messages_empty: 'Start chatting with your agent here.',
     documents_empty: 'No uploaded documents yet.',
+    trace_show: 'Show Orchestration Trace',
+    trace_hide: 'Hide Orchestration Trace',
+    trace_compact_hide: 'Collapse',
+    trace_compact_show: 'Expand',
+    trace_title: 'Orchestration Trace',
+    trace_run_label: 'Run',
+    trace_empty: 'No orchestration trace available yet.',
+    trace_stage_brief: 'BriefNormalizer',
+    trace_stage_plan: 'Planner',
+    trace_stage_generator: 'Generator',
+    trace_stage_eval: 'Evaluator',
+    trace_objective: 'Objective',
+    trace_audience: 'Audience',
+    trace_constraints: 'Constraints',
+    trace_missing: 'Missing Fields',
+    trace_assumptions: 'Executable Assumptions',
+    trace_strategy: 'Strategy',
+    trace_experiment_matrix: 'Experiment Matrix',
+    trace_generator_output: 'Marketing Content',
+    trace_reasons: 'Traceable Reasons',
+    trace_verdict: 'Overall Verdict',
+    trace_verdict_pass: 'Pass',
+    trace_verdict_needs_revision: 'Needs Revision',
+    trace_generator_preview: 'Summary of generated output:',
+    trace_brief_sentence_prefix: 'This run focuses on',
+    trace_for_audience: 'for',
+    trace_channels: 'across channels',
+    trace_strategy_sentence_prefix: 'The strategy is built around',
+    trace_pillars: 'Message pillars',
+    trace_funnel_stage: 'Funnel stage',
+    trace_offer: 'Offer strategy',
+    trace_expected_impact: 'Expected impact',
+    composer_title: 'Composer',
+    composer_hide: 'Collapse',
+    composer_show: 'Expand',
+    score_brand: 'Brand Consistency',
+    score_clarity: 'Clarity',
+    score_conversion: 'Conversion Potential',
+    score_compliance: 'Compliance Risk',
+    trace_na: 'N/A',
     shared_from: 'Shared from',
     no_group_needed: 'No group needed',
     choose_group: 'Choose group'
@@ -2089,9 +2515,35 @@ let suppressKBChange = false;
 let editingConversationId = null;
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
 let csrfToken = '';
+let activeMessages = [];
+let orchestratorRuns = [];
+let activeTraceRunId = null;
+let tracePanelVisible = false;
+let traceCompact = false;
+let composerCollapsed = false;
 
 function currentConversation() {
   return conversations.find((x) => x.id === activeConversationId) || null;
+}
+
+function defaultConversationTitle(taskMode='chat') {
+  return taskMode === 'marketing' ? t('default_marketing_title') : t('default_chat_title');
+}
+
+function isSystemDefaultConversationTitle(title) {
+  const value = String(title || '').trim();
+  return value === '新对话'
+    || value === '新营销任务'
+    || value === 'New Chat'
+    || value === 'New Marketing Task';
+}
+
+function conversationDisplayTitle(conversation) {
+  const mode = conversation && conversation.task_mode === 'marketing' ? 'marketing' : 'chat';
+  const rawTitle = String((conversation && conversation.title) || '').trim();
+  if (!rawTitle) return defaultConversationTitle(mode);
+  if (isSystemDefaultConversationTitle(rawTitle)) return defaultConversationTitle(mode);
+  return rawTitle;
 }
 
 function t(key) {
@@ -2113,6 +2565,11 @@ function applyI18n() {
   document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
   if (!activeConversationId) {
     document.getElementById('chat-title').textContent = t('no_conversation');
+  } else {
+    const active = currentConversation();
+    if (active) {
+      document.getElementById('chat-title').textContent = conversationDisplayTitle(active);
+    }
   }
   if (me) {
     document.getElementById('user-badge').textContent = `${t('current_user')}: ${me.username}`;
@@ -2129,6 +2586,10 @@ function applyI18n() {
   syncTaskModeSelect();
   syncTaskModeUI();
   syncConversationVisibilityUI();
+  syncTraceToggleButton();
+  syncTraceCompactButton();
+  syncComposerToggleButton();
+  renderTracePanel();
 }
 
 function syncTaskModeUI() {
@@ -2140,6 +2601,11 @@ function syncTaskModeUI() {
   document.getElementById('input').placeholder = marketingMode
     ? t('input_placeholder')
     : t('chat_input_placeholder');
+}
+
+function selectedOutputSections() {
+  const checks = [...document.querySelectorAll('#output-sections input[type="checkbox"]')];
+  return checks.filter((item) => item.checked).map((item) => item.value);
 }
 
 async function api(url, options={}) {
@@ -2164,6 +2630,427 @@ async function loadCsrfToken() {
 
 function fmt(ts) {
   try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+
+function listText(items) {
+  if (!Array.isArray(items) || !items.length) return t('trace_na');
+  const normalized = items.map((x) => String(x || '').trim()).filter(Boolean);
+  if (!normalized.length) return t('trace_na');
+  const separator = currentLang === 'en' ? ', ' : '、';
+  return normalized.join(separator);
+}
+
+function listValues(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((x) => String(x || '').trim()).filter(Boolean);
+}
+
+function renderBulletList(containerId, items) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  box.innerHTML = '';
+  const values = listValues(items);
+  if (!values.length) {
+    const li = document.createElement('li');
+    li.textContent = t('trace_na');
+    box.appendChild(li);
+    return;
+  }
+  for (const value of values) {
+    const li = document.createElement('li');
+    li.textContent = value;
+    box.appendChild(li);
+  }
+}
+
+function shortText(value, maxLen=420) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return t('trace_na');
+  return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+}
+
+function selectedTraceRun() {
+  if (!orchestratorRuns.length) return null;
+  if (!activeTraceRunId) return orchestratorRuns[0];
+  return orchestratorRuns.find((x) => x.id === activeTraceRunId) || orchestratorRuns[0];
+}
+
+function syncTraceToggleButton() {
+  const btn = document.getElementById('toggle-trace-btn');
+  if (!btn) return;
+  btn.textContent = tracePanelVisible ? t('trace_hide') : t('trace_show');
+}
+
+function syncTraceCompactButton() {
+  const btn = document.getElementById('toggle-trace-content-btn');
+  if (!btn) return;
+  btn.textContent = traceCompact ? t('trace_compact_show') : t('trace_compact_hide');
+}
+
+function syncComposerToggleButton() {
+  const btn = document.getElementById('toggle-composer-btn');
+  if (!btn) return;
+  btn.textContent = composerCollapsed ? t('composer_show') : t('composer_hide');
+}
+
+function toggleTraceCompact(forceCompact = null) {
+  traceCompact = typeof forceCompact === 'boolean' ? forceCompact : !traceCompact;
+  const panel = document.getElementById('trace-panel');
+  const body = document.getElementById('trace-body');
+  if (panel) panel.classList.toggle('compact', traceCompact);
+  if (body) body.classList.toggle('hidden', traceCompact);
+  syncTraceCompactButton();
+}
+
+function toggleComposer(forceCollapsed = null) {
+  composerCollapsed = typeof forceCollapsed === 'boolean' ? forceCollapsed : !composerCollapsed;
+  const composer = document.getElementById('composer');
+  const content = document.getElementById('composer-content');
+  if (composer) composer.classList.toggle('compact', composerCollapsed);
+  if (content) content.classList.toggle('hidden', composerCollapsed);
+  syncComposerToggleButton();
+}
+
+function toggleTracePanel(forceVisible = null) {
+  tracePanelVisible = typeof forceVisible === 'boolean' ? forceVisible : !tracePanelVisible;
+  const panel = document.getElementById('trace-panel');
+  if (panel) panel.classList.toggle('hidden', !tracePanelVisible);
+  syncTraceToggleButton();
+  if (!tracePanelVisible) return;
+  toggleTraceCompact(false);
+  renderTracePanel();
+}
+
+function renderTraceRunSelect() {
+  const select = document.getElementById('trace-run-select');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '';
+  for (const run of orchestratorRuns) {
+    const option = document.createElement('option');
+    option.value = String(run.id);
+    option.textContent = `${fmt(run.created_at)} · #${run.id}`;
+    select.appendChild(option);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
+  } else if (activeTraceRunId && [...select.options].some((opt) => opt.value === String(activeTraceRunId))) {
+    select.value = String(activeTraceRunId);
+  } else if (select.options.length) {
+    select.value = select.options[0].value;
+  }
+}
+
+function renderTracePanel() {
+  syncTraceToggleButton();
+  syncTraceCompactButton();
+  const empty = document.getElementById('trace-empty');
+  const grid = document.getElementById('trace-grid');
+  if (!empty || !grid) return;
+
+  renderTraceRunSelect();
+  const run = selectedTraceRun();
+  if (!run) {
+    empty.textContent = t('trace_empty');
+    empty.classList.remove('hidden');
+    grid.classList.add('hidden');
+    return;
+  }
+
+  const brief = run.brief || {};
+  const plan = run.plan || {};
+  const strategy = plan.strategy || {};
+  const evaluation = run.evaluation || {};
+  const responseMsg = activeMessages.find((m) => m.id === run.response_message_id);
+
+  const sentenceSep = currentLang === 'en' ? '. ' : '。';
+  const partSep = currentLang === 'en' ? ', ' : '，';
+  const briefStory = `${t('trace_brief_sentence_prefix')} ${brief.objective || t('trace_na')}${partSep}${
+    t('trace_for_audience')
+  } ${brief.audience || t('trace_na')}${partSep}${t('trace_channels')} ${listText(brief.channel_plan)}${sentenceSep}`;
+  document.getElementById('trace-brief-story').textContent = briefStory;
+  renderBulletList('trace-brief-constraints-list', brief.constraints);
+  renderBulletList('trace-brief-missing-list', brief.missing_info);
+  renderBulletList('trace-brief-assumptions-list', brief.assumptions);
+
+  const labelSep = currentLang === 'en' ? ': ' : '：';
+  const planStory = `${t('trace_strategy_sentence_prefix')} ${strategy.positioning_angle || t('trace_na')}${sentenceSep}${
+    t('trace_pillars')
+  }${labelSep}${listText(strategy.message_pillars)}${sentenceSep}${t('trace_funnel_stage')}${labelSep}${
+    strategy.funnel_stage || t('trace_na')
+  }${sentenceSep}${t('trace_offer')}${labelSep}${strategy.offer_strategy || t('trace_na')}${sentenceSep}`;
+  document.getElementById('trace-plan-story').textContent = planStory;
+  const experiments = Array.isArray(plan.experiment_matrix) ? plan.experiment_matrix : [];
+  const experimentLines = experiments.map((item) => {
+    const name = item && item.name ? item.name : t('trace_na');
+    const variantA = item && item.variant_a ? item.variant_a : 'A';
+    const variantB = item && item.variant_b ? item.variant_b : 'B';
+    const impact = item && item.expected_impact ? item.expected_impact : t('trace_na');
+    if (currentLang === 'en') {
+      return `${name}: ${variantA} vs ${variantB} (${t('trace_expected_impact')}: ${impact})`;
+    }
+    return `${name}：${variantA} vs ${variantB}（${t('trace_expected_impact')}：${impact}）`;
+  });
+  renderBulletList('trace-plan-experiments-list', experimentLines);
+
+  const generatedText = responseMsg ? responseMsg.content || '' : '';
+  document.getElementById('trace-generator-story').textContent = `${t('trace_generator_preview')} ${shortText(generatedText, 520)}`;
+
+  const verdictRaw = String(evaluation.overall_verdict || '').toLowerCase();
+  const verdictText = verdictRaw === 'pass'
+    ? t('trace_verdict_pass')
+    : verdictRaw === 'needs_revision'
+      ? t('trace_verdict_needs_revision')
+      : (verdictRaw || t('trace_na'));
+  document.getElementById('trace-eval-story').textContent = `${t('trace_verdict')}: ${verdictText}`;
+
+  const scores = evaluation.scores || {};
+  const scoreBox = document.getElementById('trace-eval-scores');
+  scoreBox.innerHTML = '';
+  const scoreKeys = [
+    ['brand_consistency', t('score_brand')],
+    ['clarity', t('score_clarity')],
+    ['conversion_potential', t('score_conversion')],
+    ['compliance_risk', t('score_compliance')],
+  ];
+  for (const [key, label] of scoreKeys) {
+    const item = document.createElement('div');
+    item.className = 'score-item';
+    item.innerHTML = `<div class="k">${label}</div><div class="v">${scores[key] ?? t('trace_na')}</div>`;
+    scoreBox.appendChild(item);
+  }
+
+  const reasonBox = document.getElementById('trace-eval-reasons');
+  reasonBox.innerHTML = '';
+  const reasons = Array.isArray(evaluation.reasons) ? evaluation.reasons : [];
+  if (reasons.length) {
+    for (const reason of reasons.slice(0, 6)) {
+      const li = document.createElement('li');
+      const dimension = reason && reason.dimension ? `[${reason.dimension}] ` : '';
+      const text = reason && reason.reason ? reason.reason : t('trace_na');
+      const evidence = reason && reason.evidence ? ` (${reason.evidence})` : '';
+      li.textContent = `${dimension}${text}${evidence}`;
+      reasonBox.appendChild(li);
+    }
+  } else {
+    const li = document.createElement('li');
+    li.textContent = t('trace_na');
+    reasonBox.appendChild(li);
+  }
+
+  empty.classList.add('hidden');
+  grid.classList.remove('hidden');
+}
+
+function onTraceRunChange() {
+  const select = document.getElementById('trace-run-select');
+  activeTraceRunId = select && select.value ? Number(select.value) : null;
+  renderTracePanel();
+}
+
+async function loadOrchestratorRuns(conversationId) {
+  if (!conversationId) {
+    orchestratorRuns = [];
+    activeTraceRunId = null;
+    renderTracePanel();
+    return;
+  }
+  try {
+    orchestratorRuns = await api(`/api/conversations/${conversationId}/orchestrator-runs`);
+  } catch (_) {
+    orchestratorRuns = [];
+  }
+  if (!orchestratorRuns.some((x) => x.id === activeTraceRunId)) {
+    activeTraceRunId = orchestratorRuns.length ? orchestratorRuns[0].id : null;
+  }
+  renderTracePanel();
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeHref(rawUrl) {
+  const candidate = String(rawUrl || '').trim();
+  if (/^https?:\/\//i.test(candidate)) return candidate;
+  if (/^mailto:/i.test(candidate)) return candidate;
+  return '';
+}
+
+function formatInline(rawText) {
+  let text = escapeHtml(rawText);
+  const codeTokens = [];
+  text = text.replace(/`([^`]+)`/g, (_, code) => {
+    const token = `__CODE_${codeTokens.length}__`;
+    codeTokens.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+
+  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+    const href = safeHref(url);
+    if (!href) return `${label} (${url})`;
+    return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*\\n]+)\*/g, '<em>$1</em>');
+  text = text.replace(/_([^_\\n]+)_/g, '<em>$1</em>');
+
+  for (let idx = 0; idx < codeTokens.length; idx += 1) {
+    text = text.replace(`__CODE_${idx}__`, codeTokens[idx]);
+  }
+  return text;
+}
+
+function isTableSeparatorLine(line) {
+  const text = line.trim();
+  if (!text.includes('|')) return false;
+  const normalized = text.replace(/^\|/, '').replace(/\|$/, '');
+  const cells = normalized.split('|').map((x) => x.trim());
+  if (!cells.length) return false;
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function splitTableRow(line) {
+  const normalized = String(line || '').trim().replace(/^\|/, '').replace(/\|$/, '');
+  return normalized.split('|').map((x) => x.trim());
+}
+
+function isParagraphStop(line) {
+  const text = line.trim();
+  if (!text) return true;
+  if (/^```/.test(text)) return true;
+  if (/^#{1,4}\s+/.test(text)) return true;
+  if (/^(-{3,}|\*{3,}|_{3,})$/.test(text)) return true;
+  if (/^>\s?/.test(text)) return true;
+  if (/^[-*+]\s+/.test(text)) return true;
+  if (/^\d+\.\s+/.test(text)) return true;
+  return false;
+}
+
+function markdownToHtml(rawText) {
+  const lines = String(rawText || '').replace(/\\r\\n?/g, '\\n').split('\\n');
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    if (/^```/.test(trimmed)) {
+      const codeLines = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      out.push(`<pre><code>${escapeHtml(codeLines.join('\\n'))}</code></pre>`);
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      out.push(`<h${level}>${formatInline(heading[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      out.push('<hr />');
+      i += 1;
+      continue;
+    }
+
+    if (trimmed.includes('|') && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) {
+      const headers = splitTableRow(trimmed);
+      i += 2;
+      const rows = [];
+      while (i < lines.length) {
+        const rowLine = lines[i].trim();
+        if (!rowLine || !rowLine.includes('|') || isTableSeparatorLine(rowLine)) break;
+        rows.push(splitTableRow(rowLine));
+        i += 1;
+      }
+      const thead = `<thead><tr>${headers.map((cell) => `<th>${formatInline(cell)}</th>`).join('')}</tr></thead>`;
+      const tbody = rows.length
+        ? `<tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${formatInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`
+        : '';
+      out.push(`<table>${thead}${tbody}</table>`);
+      continue;
+    }
+
+    if (/^[-*+]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length) {
+        const row = lines[i].trim();
+        const match = row.match(/^[-*+]\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${formatInline(match[1])}</li>`);
+        i += 1;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length) {
+        const row = lines[i].trim();
+        const match = row.match(/^\d+\.\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${formatInline(match[1])}</li>`);
+        i += 1;
+      }
+      out.push(`<ol>${items.join('')}</ol>`);
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const parts = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        parts.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      out.push(`<blockquote><p>${parts.map((part) => formatInline(part)).join('<br />')}</p></blockquote>`);
+      continue;
+    }
+
+    const paragraph = [];
+    while (i < lines.length && !isParagraphStop(lines[i])) {
+      paragraph.push(lines[i].trim());
+      i += 1;
+    }
+    out.push(`<p>${paragraph.map((part) => formatInline(part)).join('<br />')}</p>`);
+  }
+
+  return out.join('');
+}
+
+function safeMessageHtml(rawText) {
+  try {
+    return markdownToHtml(rawText || '');
+  } catch (_) {
+    return `<p>${escapeHtml(rawText || '')}</p>`;
+  }
+}
+
+function setMessageContent(node, rawText) {
+  const content = document.createElement('div');
+  content.className = 'msg-content';
+  content.innerHTML = safeMessageHtml(rawText);
+  node.innerHTML = '';
+  node.appendChild(content);
 }
 
 function renderDocuments() {
@@ -2570,7 +3457,7 @@ function renderConversations() {
     } else {
       const title = document.createElement('div');
       title.className = 'chat-title';
-      title.textContent = c.title;
+      title.textContent = conversationDisplayTitle(c);
       title.ondblclick = (event) => {
         event.stopPropagation();
         startInlineRename(c.id);
@@ -2627,7 +3514,8 @@ async function submitInlineRename(conversationId, rawTitle) {
       c.id === conversationId ? {...c, title: data.title, updated_at: data.updated_at} : c
     ));
     if (activeConversationId === conversationId) {
-      document.getElementById('chat-title').textContent = data.title;
+      const mode = target && target.task_mode ? target.task_mode : 'chat';
+      document.getElementById('chat-title').textContent = conversationDisplayTitle({title: data.title, task_mode: mode});
     }
   } catch (e) {
     alert(`${t('rename_failed')}: ${e.message}`);
@@ -2638,19 +3526,20 @@ async function submitInlineRename(conversationId, rawTitle) {
 }
 
 function renderMessages(items) {
+  activeMessages = Array.isArray(items) ? items : [];
   const box = document.getElementById('messages');
   box.innerHTML = '';
-  if (!items.length) {
+  if (!activeMessages.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.textContent = t('messages_empty');
     box.appendChild(empty);
     return;
   }
-  for (const m of items) {
+  for (const m of activeMessages) {
     const div = document.createElement('div');
     div.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
-    div.textContent = m.content;
+    setMessageContent(div, m.content || '');
     box.appendChild(div);
   }
   box.scrollTop = box.scrollHeight;
@@ -2681,24 +3570,30 @@ async function loadConversations() {
   await syncKBSelects();
   syncTaskModeUI();
   syncConversationVisibilityUI();
+  if (!activeConversationId) {
+    await loadOrchestratorRuns(null);
+  }
 }
 
 async function createConversation(taskMode='chat') {
+  const localizedDefaultTitle = defaultConversationTitle(taskMode);
   const created = await api('/api/conversations', {
     method:'POST',
-    body:JSON.stringify({task_mode: taskMode, visibility: 'private', share_group_id: null})
+    body:JSON.stringify({
+      task_mode: taskMode,
+      title: localizedDefaultTitle,
+      ui_language: currentLang,
+      visibility: 'private',
+      share_group_id: null
+    })
   });
-  if (created.title === '新对话') {
-    created.title = t('default_chat_title');
-  }
-  if (created.title === '新营销任务') {
-    created.title = t('default_marketing_title');
-  }
+  created.title = conversationDisplayTitle(created);
   conversations.unshift(created);
   activeConversationId = created.id;
   renderConversations();
-  document.getElementById('chat-title').textContent = created.title;
+  document.getElementById('chat-title').textContent = conversationDisplayTitle(created);
   renderMessages([]);
+  await loadOrchestratorRuns(created.id);
   activeDocuments = [];
   renderDocuments();
   syncModelSelect();
@@ -2711,11 +3606,12 @@ async function createConversation(taskMode='chat') {
 async function openConversation(id) {
   activeConversationId = id;
   const conv = conversations.find(x => x.id === id);
-  if (conv) document.getElementById('chat-title').textContent = conv.title;
+  if (conv) document.getElementById('chat-title').textContent = conversationDisplayTitle(conv);
   renderConversations();
   const items = await api(`/api/conversations/${id}/messages`);
   renderMessages(items);
   await loadDocuments(id);
+  await loadOrchestratorRuns(id);
   syncModelSelect();
   syncTaskModeSelect();
   await syncKBSelects();
@@ -2759,6 +3655,7 @@ async function deleteConversation() {
   if (!conversations.length) {
     document.getElementById('chat-title').textContent = t('no_conversation');
     renderMessages([]);
+    await loadOrchestratorRuns(null);
     activeDocuments = [];
     renderDocuments();
     syncModelSelect();
@@ -2807,12 +3704,12 @@ async function sendMessage() {
   if (empty) empty.remove();
   const pendingUser = document.createElement('div');
   pendingUser.className = 'msg user';
-  pendingUser.textContent = content;
+  setMessageContent(pendingUser, content);
   box.appendChild(pendingUser);
 
   const pendingBot = document.createElement('div');
   pendingBot.className = 'msg assistant';
-  pendingBot.textContent = t('thinking');
+  setMessageContent(pendingBot, t('thinking'));
   box.appendChild(pendingBot);
   box.scrollTop = box.scrollHeight;
 
@@ -2825,16 +3722,20 @@ async function sendMessage() {
       payload.audience = document.getElementById('brief-audience').value.trim() || null;
       payload.objective = document.getElementById('brief-objective').value.trim() || null;
       payload.extra_requirements = document.getElementById('brief-extra').value.trim() || null;
+      payload.output_sections = selectedOutputSections();
     }
     const data = await api(`/api/conversations/${activeConversationId}/messages`, {
       method:'POST',
       body: JSON.stringify(payload)
     });
-    pendingBot.textContent = data.assistant_message.content;
+    setMessageContent(pendingBot, data.assistant_message.content);
+    const refreshedItems = await api(`/api/conversations/${activeConversationId}/messages`);
+    renderMessages(refreshedItems);
+    await loadOrchestratorRuns(activeConversationId);
     await loadConversations();
     renderConversations();
   } catch (e) {
-    pendingBot.textContent = `${t('request_error')}: ${e.message}`;
+    setMessageContent(pendingBot, `${t('request_error')}: ${e.message}`);
   }
 }
 
@@ -2902,6 +3803,7 @@ async function renameConversation() {
 function gotoAdmin() { location.href = '/admin'; }
 function gotoKB() { location.href = '/kb'; }
 function gotoGroups() { location.href = '/groups'; }
+function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init(){
   try {
@@ -3048,6 +3950,7 @@ KB_HTML = """
       <div class="toolbar">
         <button id="lang-zh" onclick="setLang('zh')">中文</button>
         <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button onclick="backToApp()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -3133,6 +4036,7 @@ KB_HTML = """
 const I18N = {
   zh: {
     title: 'Brand KB 管理',
+    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     kb_list: 'KB 列表',
@@ -3170,6 +4074,7 @@ const I18N = {
   },
   en: {
     title: 'Brand KB Management',
+    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     kb_list: 'KB List',
@@ -3470,6 +4375,7 @@ async function deleteVersion() {
 }
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function backToApp() { location.href = '/app'; }
+function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -3523,6 +4429,7 @@ GROUPS_HTML = """
       <div class="toolbar">
         <button id="lang-zh" onclick="setLang('zh')">中文</button>
         <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button onclick="backToApp()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -3580,6 +4487,7 @@ GROUPS_HTML = """
 const I18N = {
   zh: {
     title: '组管理',
+    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     create_group: '创建组',
@@ -3611,6 +4519,7 @@ const I18N = {
   },
   en: {
     title: 'Group Management',
+    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     create_group: 'Create Group',
@@ -3872,6 +4781,7 @@ async function transferAdmin() {
 }
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function backToApp() { location.href = '/app'; }
+function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -3999,6 +4909,7 @@ ADMIN_HTML = """
       <div class="toolbar">
         <button id="lang-zh" onclick="setLang('zh')">中文</button>
         <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="gotoExperiments()" data-i18n="experiments_nav">Experiments</button>
         <button onclick="back()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -4043,6 +4954,7 @@ const I18N = {
   zh: {
     page_title: '用户管理',
     title: '用户管理',
+    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     create_user: '创建用户',
@@ -4073,6 +4985,7 @@ const I18N = {
   en: {
     page_title: 'User Management',
     title: 'User Management',
+    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     create_user: 'Create User',
@@ -4103,6 +5016,7 @@ const I18N = {
 };
 
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let csrfToken = '';
 
 function t(key) {
   return (I18N[currentLang] && I18N[currentLang][key]) || key;
@@ -4196,6 +5110,7 @@ async function resetPwd(userId) {
 
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function back() { location.href = '/app'; }
+function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -4204,6 +5119,688 @@ function back() { location.href = '/app'; }
     await loadUsers();
   } catch {
     location.href = '/app';
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+EXPERIMENTS_HTML = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Marketing Copilot - Experiments</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
+    :root {
+      --bg:#eef4ff;
+      --line:#d6dfec;
+      --line-strong:#bfcee3;
+      --txt:#0f1b2d;
+      --muted:#55657d;
+      --accent:#0a67d3;
+      --ok:#0f766e;
+      --danger:#c53939;
+      --shadow:0 18px 36px rgba(16,32,62,.12);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family:"IBM Plex Sans","Segoe UI",sans-serif;
+      background:
+        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
+        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
+        linear-gradient(160deg,#edf4ff,#f5fbf6);
+      color:var(--txt);
+    }
+    .wrap { max-width:1240px; margin:16px auto; padding:0 14px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
+    .top h2 { margin:0; font-family:"Sora","IBM Plex Sans",sans-serif; }
+    .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    .toolbar button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .layout { display:grid; grid-template-columns: 350px 1fr; gap:12px; }
+    .card {
+      background:rgba(255,255,255,.88);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+    .card h3 { margin:0 0 10px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; }
+    label {
+      font-size:12px;
+      color:var(--muted);
+      display:block;
+      margin-bottom:4px;
+      font-weight:600;
+    }
+    input, select, textarea, button {
+      width:100%;
+      box-sizing:border-box;
+      padding:9px 10px;
+      border-radius:11px;
+      border:1px solid var(--line);
+      font-family:inherit;
+      color:var(--txt);
+      background:#fff;
+      transition:.16s ease;
+    }
+    textarea {
+      min-height:96px;
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      font-size:12px;
+      resize:vertical;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline:none;
+      border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(10,103,211,.14);
+    }
+    button { cursor:pointer; font-weight:600; }
+    button:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 14px rgba(15,30,60,.07); }
+    button.primary { background:linear-gradient(120deg,var(--accent),#0987cf); border-color:transparent; color:#fff; }
+    .list {
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      max-height:320px;
+      overflow:auto;
+      padding-right:2px;
+      margin-bottom:12px;
+    }
+    .item {
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:9px;
+      cursor:pointer;
+      background:#fff;
+      transition:.16s ease;
+    }
+    .item:hover { transform:translateY(-1px); border-color:var(--line-strong); }
+    .item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
+    .item .name { font-weight:700; font-size:14px; }
+    .item .meta { color:var(--muted); font-size:12px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+    .empty {
+      border:1px dashed var(--line-strong);
+      border-radius:12px;
+      padding:13px;
+      text-align:center;
+      color:var(--muted);
+      background:rgba(255,255,255,.62);
+      font-size:13px;
+    }
+    .grid { display:grid; gap:10px; grid-template-columns:1fr 1fr; }
+    .full { grid-column:1 / -1; }
+    .section-title { margin:12px 0 8px; font-size:13px; font-weight:700; color:#1b2f4d; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .actions button { width:auto; }
+    .msg {
+      font-size:12px;
+      margin-top:10px;
+      color:var(--ok);
+      min-height:20px;
+      border-radius:10px;
+      background:#f3fdf9;
+      border:1px solid #bde9d9;
+      padding:7px 10px;
+    }
+    .warn { color:var(--danger); background:#fff6f6; border-color:#f0c9c9; }
+    #exp-detail-panel.hidden, #exp-detail-empty.hidden { display:none; }
+    .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
+    .variant-card {
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:8px;
+      background:#fff;
+      margin-bottom:8px;
+    }
+    .variant-card .key {
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      font-size:12px;
+      color:#355174;
+      margin-bottom:6px;
+      text-transform:uppercase;
+    }
+    *::-webkit-scrollbar { width:10px; height:10px; }
+    *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
+    *::-webkit-scrollbar-track { background:transparent; }
+    @media (max-width: 1000px) {
+      .layout { grid-template-columns:1fr; }
+      .grid { grid-template-columns:1fr; }
+      .actions button { width:100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h2 data-i18n="title">实验中心</h2>
+      <div class="toolbar">
+        <button id="lang-zh" onclick="setLang('zh')">中文</button>
+        <button id="lang-en" onclick="setLang('en')">EN</button>
+        <button onclick="gotoApp()" data-i18n="back">返回聊天</button>
+        <button onclick="gotoKB()" data-i18n="kb_nav">KB 管理</button>
+        <button onclick="gotoGroups()" data-i18n="group_nav">组管理</button>
+        <button onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="admin_nav">用户管理</button>
+        <button onclick="logout()" data-i18n="logout">退出</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <h3 data-i18n="exp_list">实验列表</h3>
+        <div id="exp-list" class="list"></div>
+
+        <h3 data-i18n="create_exp">创建实验</h3>
+        <label for="create-title" data-i18n="title_label">标题</label>
+        <input id="create-title" />
+        <label for="create-hypothesis" data-i18n="hypothesis_label">假设</label>
+        <textarea id="create-hypothesis"></textarea>
+        <label for="create-conversation" data-i18n="conversation_label">关联会话（可选）</label>
+        <select id="create-conversation"></select>
+        <label for="create-traffic" data-i18n="traffic_label">流量分配 JSON（可选）</label>
+        <textarea id="create-traffic">{"A":50,"B":50}</textarea>
+        <div class="actions">
+          <button class="primary" onclick="createExperiment()" data-i18n="create_btn">创建</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 id="exp-detail-title" data-i18n="detail_title">实验详情</h3>
+        <div id="exp-detail-empty" class="empty"></div>
+
+        <div id="exp-detail-panel" class="hidden">
+          <div class="grid">
+            <div class="full">
+              <label for="detail-name-input" data-i18n="detail_name">实验名称</label>
+              <input id="detail-name-input" />
+            </div>
+            <div class="full">
+              <label for="detail-hypothesis-input" data-i18n="detail_hypothesis">实验假设</label>
+              <textarea id="detail-hypothesis-input"></textarea>
+            </div>
+            <div>
+              <label for="status-select" data-i18n="status_label">状态</label>
+              <select id="status-select">
+                <option value="draft" data-i18n="status_draft">草稿</option>
+                <option value="running" data-i18n="status_running">运行中</option>
+                <option value="paused" data-i18n="status_paused">暂停</option>
+                <option value="completed" data-i18n="status_completed">完成</option>
+                <option value="archived" data-i18n="status_archived">归档</option>
+              </select>
+            </div>
+            <div>
+              <label data-i18n="updated_at">更新时间</label>
+              <div id="detail-updated" class="mono"></div>
+            </div>
+            <div class="full">
+              <label data-i18n="traffic_display">流量分配</label>
+              <textarea id="detail-traffic"></textarea>
+            </div>
+            <div class="full">
+              <label for="result-json" data-i18n="result_label">结果 JSON</label>
+              <textarea id="result-json">{}</textarea>
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="saveExperimentMeta()" data-i18n="save_meta">保存实验信息</button>
+            <button onclick="saveStatusAndResult()" data-i18n="save_status">保存状态与结果</button>
+            <button onclick="deleteExperiment()" data-i18n="delete_experiment">删除实验</button>
+          </div>
+
+          <div class="section-title" data-i18n="variants_title">Variants</div>
+          <div id="variant-list"></div>
+          <div class="grid">
+            <div>
+              <label for="variant-key" data-i18n="variant_key_label">Variant Key</label>
+              <input id="variant-key" placeholder="A" />
+            </div>
+            <div class="full">
+              <label for="variant-content" data-i18n="variant_content_label">Variant Content</label>
+              <textarea id="variant-content"></textarea>
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="saveVariant()" data-i18n="save_variant">保存 Variant</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="msg" class="msg"></div>
+  </div>
+
+<script>
+const I18N = {
+  zh: {
+    title: '实验中心',
+    back: '返回聊天',
+    kb_nav: 'KB 管理',
+    group_nav: '组管理',
+    admin_nav: '用户管理',
+    logout: '退出',
+    exp_list: '实验列表',
+    create_exp: '创建实验',
+    title_label: '标题',
+    hypothesis_label: '假设',
+    conversation_label: '关联会话（可选）',
+    traffic_label: '流量分配 JSON（可选）',
+    create_btn: '创建',
+    detail_title: '实验详情',
+    detail_name: '实验名称',
+    detail_hypothesis: '实验假设',
+    status_label: '状态',
+    status_draft: '草稿',
+    status_running: '运行中',
+    status_paused: '暂停',
+    status_completed: '完成',
+    status_archived: '归档',
+    updated_at: '更新时间',
+    traffic_display: '流量分配',
+    result_label: '结果 JSON',
+    save_meta: '保存实验信息',
+    save_status: '保存状态与结果',
+    delete_experiment: '删除实验',
+    variants_title: '实验 Variants',
+    variant_key_label: 'Variant Key',
+    variant_content_label: 'Variant 内容',
+    save_variant: '保存 Variant',
+    request_failed: '请求失败',
+    no_experiments: '还没有实验，请先创建。',
+    no_selected: '请选择一个实验查看详情。',
+    no_variants: '暂无 variants',
+    conv_none: '不关联会话',
+    create_ok: '实验创建成功',
+    update_ok: '实验已更新',
+    variant_ok: 'Variant 已保存',
+    delete_ok: '实验已删除',
+    delete_confirm: '确定删除这个实验吗？',
+    invalid_json: 'JSON 格式错误',
+    required_title: '标题不能为空',
+    required_hypothesis: '假设不能为空',
+    required_variant_key: 'Variant key 不能为空',
+    required_variant_content: 'Variant 内容不能为空'
+  },
+  en: {
+    title: 'Experiments',
+    back: 'Back to Chat',
+    kb_nav: 'KB Management',
+    group_nav: 'Group Management',
+    admin_nav: 'User Management',
+    logout: 'Log Out',
+    exp_list: 'Experiments',
+    create_exp: 'Create Experiment',
+    title_label: 'Title',
+    hypothesis_label: 'Hypothesis',
+    conversation_label: 'Conversation (optional)',
+    traffic_label: 'Traffic Allocation JSON (optional)',
+    create_btn: 'Create',
+    detail_title: 'Experiment Detail',
+    detail_name: 'Title',
+    detail_hypothesis: 'Hypothesis',
+    status_label: 'Status',
+    status_draft: 'Draft',
+    status_running: 'Running',
+    status_paused: 'Paused',
+    status_completed: 'Completed',
+    status_archived: 'Archived',
+    updated_at: 'Updated At',
+    traffic_display: 'Traffic Allocation',
+    result_label: 'Result JSON',
+    save_meta: 'Save Experiment Meta',
+    save_status: 'Save Status & Result',
+    delete_experiment: 'Delete Experiment',
+    variants_title: 'Variants',
+    variant_key_label: 'Variant Key',
+    variant_content_label: 'Variant Content',
+    save_variant: 'Save Variant',
+    request_failed: 'Request failed',
+    no_experiments: 'No experiments yet. Create one first.',
+    no_selected: 'Select an experiment to view details.',
+    no_variants: 'No variants yet',
+    conv_none: 'No linked conversation',
+    create_ok: 'Experiment created',
+    update_ok: 'Experiment updated',
+    variant_ok: 'Variant saved',
+    delete_ok: 'Experiment deleted',
+    delete_confirm: 'Delete this experiment?',
+    invalid_json: 'Invalid JSON',
+    required_title: 'Title is required',
+    required_hypothesis: 'Hypothesis is required',
+    required_variant_key: 'Variant key is required',
+    required_variant_content: 'Variant content is required'
+  }
+};
+
+let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let csrfToken = '';
+let me = null;
+let conversations = [];
+let experiments = [];
+let activeExperiment = null;
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || key;
+}
+
+function setMsg(text, isWarn=false) {
+  const el = document.getElementById('msg');
+  el.textContent = text || '';
+  el.classList.toggle('warn', !!isWarn);
+}
+
+function statusLabel(status) {
+  return t(`status_${status}`) || status;
+}
+
+function fmt(ts) {
+  try { return new Date(ts).toLocaleString(); } catch { return ts || ''; }
+}
+
+function parseJsonObject(text, fallback={}) {
+  const raw = (text || '').trim();
+  if (!raw) return fallback;
+  const value = JSON.parse(raw);
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    throw new Error(t('invalid_json'));
+  }
+  return value;
+}
+
+function pretty(value) {
+  try { return JSON.stringify(value || {}, null, 2); } catch { return '{}'; }
+}
+
+function setLang(lang) {
+  currentLang = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('nova_lang', currentLang);
+  applyI18n();
+  renderConversationSelect();
+  renderExperiments();
+  renderExperimentDetail();
+}
+
+function applyI18n() {
+  document.title = t('title');
+  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
+  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
+}
+
+async function api(url, options={}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = {'Content-Type':'application/json'};
+  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const res = await fetch(url, {headers, ...options});
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data.detail || t('request_failed'));
+  return data;
+}
+
+async function loadCsrfToken() {
+  const res = await fetch('/api/csrf');
+  if (!res.ok) throw new Error('csrf');
+  const data = await res.json();
+  csrfToken = data.csrf_token || '';
+}
+
+function renderConversationSelect() {
+  const select = document.getElementById('create-conversation');
+  const previous = select.value;
+  select.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = t('conv_none');
+  select.appendChild(none);
+
+  const ownConversations = conversations.filter((c) => me && c.user_id === me.id);
+  for (const c of ownConversations) {
+    const option = document.createElement('option');
+    option.value = String(c.id);
+    option.textContent = c.title;
+    select.appendChild(option);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function renderExperiments() {
+  const box = document.getElementById('exp-list');
+  box.innerHTML = '';
+  if (!experiments.length) {
+    box.innerHTML = `<div class="empty">${t('no_experiments')}</div>`;
+    return;
+  }
+  for (const exp of experiments) {
+    const div = document.createElement('div');
+    div.className = 'item' + (activeExperiment && exp.id === activeExperiment.id ? ' active' : '');
+    div.onclick = () => openExperiment(exp.id);
+    div.innerHTML = `
+      <div class="name">${exp.title}</div>
+      <div class="meta">${statusLabel(exp.status)} · ${fmt(exp.updated_at)}</div>
+    `;
+    box.appendChild(div);
+  }
+}
+
+function renderVariants(variants) {
+  const box = document.getElementById('variant-list');
+  box.innerHTML = '';
+  if (!variants || !variants.length) {
+    box.innerHTML = `<div class="empty">${t('no_variants')}</div>`;
+    return;
+  }
+  for (const variant of variants) {
+    const card = document.createElement('div');
+    card.className = 'variant-card';
+    card.innerHTML = `
+      <div class="key">${variant.variant_key}</div>
+      <div class="mono">${(variant.content || '').replace(/</g, '&lt;')}</div>
+    `;
+    box.appendChild(card);
+  }
+}
+
+function renderExperimentDetail() {
+  const empty = document.getElementById('exp-detail-empty');
+  const panel = document.getElementById('exp-detail-panel');
+  if (!activeExperiment) {
+    empty.textContent = t('no_selected');
+    empty.classList.remove('hidden');
+    panel.classList.add('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  panel.classList.remove('hidden');
+  document.getElementById('detail-name-input').value = activeExperiment.title || '';
+  document.getElementById('detail-hypothesis-input').value = activeExperiment.hypothesis || '';
+  document.getElementById('detail-updated').textContent = fmt(activeExperiment.updated_at);
+  document.getElementById('detail-traffic').value = pretty(activeExperiment.traffic_allocation || {});
+  document.getElementById('status-select').value = activeExperiment.status || 'draft';
+  document.getElementById('result-json').value = pretty(activeExperiment.result || {});
+  renderVariants(activeExperiment.variants || []);
+}
+
+async function refreshExperiments() {
+  experiments = await api('/api/experiments');
+  renderExperiments();
+  if (!activeExperiment && experiments.length) {
+    await openExperiment(experiments[0].id);
+  }
+}
+
+async function createExperiment() {
+  const title = document.getElementById('create-title').value.trim();
+  const hypothesis = document.getElementById('create-hypothesis').value.trim();
+  const conversationRaw = document.getElementById('create-conversation').value;
+  if (!title) {
+    setMsg(t('required_title'), true);
+    return;
+  }
+  if (!hypothesis) {
+    setMsg(t('required_hypothesis'), true);
+    return;
+  }
+  try {
+    const payload = {
+      title,
+      hypothesis,
+      conversation_id: conversationRaw ? Number(conversationRaw) : null,
+      traffic_allocation: parseJsonObject(document.getElementById('create-traffic').value, {}),
+    };
+    const created = await api('/api/experiments', {
+      method:'POST',
+      body: JSON.stringify(payload),
+    });
+    setMsg(t('create_ok'));
+    document.getElementById('create-title').value = '';
+    document.getElementById('create-hypothesis').value = '';
+    await refreshExperiments();
+    if (created && created.id) {
+      await openExperiment(created.id);
+    }
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function openExperiment(experimentId) {
+  try {
+    activeExperiment = await api(`/api/experiments/${experimentId}`);
+    renderExperiments();
+    renderExperimentDetail();
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function saveExperimentMeta() {
+  if (!activeExperiment) return;
+  const title = document.getElementById('detail-name-input').value.trim();
+  const hypothesis = document.getElementById('detail-hypothesis-input').value.trim();
+  if (!title) {
+    setMsg(t('required_title'), true);
+    return;
+  }
+  if (!hypothesis) {
+    setMsg(t('required_hypothesis'), true);
+    return;
+  }
+  try {
+    await api(`/api/experiments/${activeExperiment.id}`, {
+      method:'PATCH',
+      body: JSON.stringify({
+        title,
+        hypothesis,
+        traffic_allocation: parseJsonObject(document.getElementById('detail-traffic').value, {}),
+      }),
+    });
+    setMsg(t('update_ok'));
+    await openExperiment(activeExperiment.id);
+    experiments = await api('/api/experiments');
+    renderExperiments();
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function saveStatusAndResult() {
+  if (!activeExperiment) return;
+  try {
+    const payload = {
+      status: document.getElementById('status-select').value,
+      result: parseJsonObject(document.getElementById('result-json').value, {}),
+    };
+    await api(`/api/experiments/${activeExperiment.id}/status`, {
+      method:'PATCH',
+      body: JSON.stringify(payload),
+    });
+    setMsg(t('update_ok'));
+    await openExperiment(activeExperiment.id);
+    experiments = await api('/api/experiments');
+    renderExperiments();
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function deleteExperiment() {
+  if (!activeExperiment) return;
+  if (!confirm(t('delete_confirm'))) return;
+  try {
+    const deletingId = activeExperiment.id;
+    await api(`/api/experiments/${deletingId}`, {method:'DELETE'});
+    setMsg(t('delete_ok'));
+    activeExperiment = null;
+    await refreshExperiments();
+    if (!experiments.length) {
+      renderExperimentDetail();
+    }
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function saveVariant() {
+  if (!activeExperiment) return;
+  const variant_key = document.getElementById('variant-key').value.trim();
+  const content = document.getElementById('variant-content').value.trim();
+  if (!variant_key) {
+    setMsg(t('required_variant_key'), true);
+    return;
+  }
+  if (!content) {
+    setMsg(t('required_variant_content'), true);
+    return;
+  }
+  try {
+    await api(`/api/experiments/${activeExperiment.id}/variants`, {
+      method:'POST',
+      body: JSON.stringify({variant_key, content}),
+    });
+    setMsg(t('variant_ok'));
+    document.getElementById('variant-content').value = '';
+    await openExperiment(activeExperiment.id);
+  } catch (e) {
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
+  }
+}
+
+async function logout() {
+  await api('/logout', {method:'POST'});
+  location.href = '/';
+}
+
+function gotoApp() { location.href = '/app'; }
+function gotoKB() { location.href = '/kb'; }
+function gotoGroups() { location.href = '/groups'; }
+function gotoAdmin() { location.href = '/admin'; }
+
+(async function init() {
+  applyI18n();
+  try {
+    await loadCsrfToken();
+    [me, conversations] = await Promise.all([
+      api('/api/me'),
+      api('/api/conversations'),
+    ]);
+    if (me && me.is_admin) {
+      document.getElementById('admin-btn').style.display = 'inline-block';
+    }
+    renderConversationSelect();
+    await refreshExperiments();
+    renderExperimentDetail();
+  } catch {
+    location.href = '/';
   }
 })();
 </script>
@@ -4333,6 +5930,13 @@ def groups_page(request: Request) -> Any:
     if not current_user(request):
         return RedirectResponse(url="/", status_code=302)
     return HTMLResponse(GROUPS_HTML)
+
+
+@app.get("/experiments", response_class=HTMLResponse)
+def experiments_page(request: Request) -> Any:
+    if not current_user(request):
+        return RedirectResponse(url="/", status_code=302)
+    return HTMLResponse(EXPERIMENTS_HTML)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -4804,6 +6408,41 @@ def get_experiment(experiment_id: int, request: Request) -> Any:
     return item
 
 
+@app.patch("/api/experiments/{experiment_id}")
+def update_experiment(experiment_id: int, body: ExperimentUpdateInput, request: Request) -> Any:
+    user = must_login(request)
+    updates: dict[str, Any] = {}
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty")
+        updates["title"] = title[:160]
+    if body.hypothesis is not None:
+        hypothesis = body.hypothesis.strip()
+        if not hypothesis:
+            raise HTTPException(status_code=400, detail="hypothesis cannot be empty")
+        updates["hypothesis"] = hypothesis[:2000]
+    if body.traffic_allocation is not None:
+        updates["traffic_allocation_json"] = _json_dumps(
+            body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}
+        )
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        exp = conn.execute(
+            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
+            (experiment_id, user["id"]),
+        ).fetchone()
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        set_sql = ", ".join([f"{key} = ?" for key in updates.keys()] + ["updated_at = ?"])
+        values = list(updates.values()) + [now, experiment_id]
+        conn.execute(f"UPDATE experiments SET {set_sql} WHERE id = ?", tuple(values))
+    return {"ok": True}
+
+
 @app.post("/api/experiments/{experiment_id}/variants")
 def upsert_experiment_variant(experiment_id: int, body: ExperimentVariantInput, request: Request) -> Any:
     user = must_login(request)
@@ -4853,6 +6492,21 @@ def update_experiment_status(experiment_id: int, body: ExperimentStatusInput, re
             """,
             (status, _json_dumps(body.result if isinstance(body.result, dict) else {}), now, experiment_id),
         )
+    return {"ok": True}
+
+
+@app.delete("/api/experiments/{experiment_id}")
+def delete_experiment(experiment_id: int, request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        exp = conn.execute(
+            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
+            (experiment_id, user["id"]),
+        ).fetchone()
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        conn.execute("DELETE FROM experiment_variants WHERE experiment_id = ?", (experiment_id,))
+        conn.execute("DELETE FROM experiments WHERE id = ?", (experiment_id,))
     return {"ok": True}
 
 
@@ -5167,7 +6821,12 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     user = must_login(request)
     task_mode = _normalize_task_mode(body.task_mode)
     visibility, share_group_id = _validate_share_group_for_user(user["id"], body.visibility, body.share_group_id)
-    default_title = "新营销任务" if task_mode == "marketing" else "新对话"
+    lang = (body.ui_language or "").strip().lower()
+    is_english = lang.startswith("en")
+    if task_mode == "marketing":
+        default_title = "New Marketing Task" if is_english else "新营销任务"
+    else:
+        default_title = "New Chat" if is_english else "新对话"
     title = (body.title or default_title).strip() or default_title
     now = now_utc().isoformat()
     model_id = DEFAULT_MODEL_ID
@@ -5552,6 +7211,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "objective": body.objective,
         "brand_voice": body.brand_voice,
         "ui_language": body.ui_language,
+        "output_sections": body.output_sections,
         "model_id": conversation["model_id"],
         "include_trace": True,
     }
@@ -5627,7 +7287,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
                 ),
             )
 
-        if conversation["title"] in {"新对话", "新营销任务"}:
+        if _is_default_conversation_title(conversation["title"]):
             new_title = content[:30]
             conn.execute(
                 "UPDATE conversations SET title = ?, model_id = ?, updated_at = ? WHERE id = ?",

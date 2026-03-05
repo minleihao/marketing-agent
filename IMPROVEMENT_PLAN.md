@@ -37,17 +37,17 @@
 - Add approval workflow for high-risk outputs:
 - evaluator score threshold + human approval state
 - Extend experiment center:
-- hypothesis lifecycle, variant traffic split, result ingestion endpoint, auto retrospective
+- hypothesis lifecycle, variant traffic split, result ingestion endpoint, assisted retrospective summary
 
 ### Phase C (P2, next)
-- Connector layer (read-first):
-- GA4, HubSpot, Meta Ads, Google Ads
 - Async worker queue for heavy tasks:
-- generation, scoring, connector sync, nightly summaries
-- Event-driven workflow:
-- brief -> plan -> generate -> evaluate -> approve -> publish draft
+- generation, scoring, nightly summaries
+- Internal event workflow (non-publishing only):
+- brief -> plan -> generate -> evaluate -> review-ready package
 - Metrics cockpit service:
 - CTR/CVR/CPL/CAC ingestion and recommendation loop
+- Explicit non-goal:
+- no direct company-channel publishing/distribution integration in this app stage
 
 ## 2) Prompt/Orchestration Detailed Spec
 ### BriefNormalizer
@@ -135,8 +135,10 @@
 - `GET /api/experiments`
 - `POST /api/experiments`
 - `GET /api/experiments/{id}`
+- `PATCH /api/experiments/{id}`
 - `POST /api/experiments/{id}/variants`
 - `PATCH /api/experiments/{id}/status`
+- `DELETE /api/experiments/{id}`
 
 ## 7) Frontend Updates (Implemented)
 - App/KB/Groups/Admin pages:
@@ -144,11 +146,27 @@
 - App page:
 - password change action button
 - forced password-change flow support
+- Added dedicated `Experiments` workspace page:
+- list/create experiments
+- detail view with status/result updates
+- detail meta editing (title/hypothesis/traffic)
+- variant create/update flow
+- experiment delete action
+- Added cross-page navigation entry to Experiments from Chat/KB/Groups/Admin
+- Fixed missing `csrfToken` declaration in Admin page script
+- Added Chat Orchestration Trace panel:
+- BriefNormalizer/Planner/Generator/Evaluator outputs displayed by run
+- trace run selector and structured fields (objective/audience/constraints/missing assumptions)
+- evaluator scores and reasons visualization
 
 ## 8) Validation and Regression Plan
 ### Automated
 - `python -m py_compile src/main.py src/prompts.py src/webapp.py`
 - `uv run pytest -q`
+- New API regression coverage in `test/test_webapp.py`:
+- CSRF enforcement (reject + allow paths)
+- private KB binding permission boundary
+- experiments lifecycle API smoke
 
 ### Scenario-level Smoke
 - multi-user group approval and content sharing isolation
@@ -158,16 +176,15 @@
 
 ## 9) Remaining Work Items (Prioritized)
 ### Immediate
-- Add dedicated pytest suites for:
-- permission matrix
-- CSRF enforcement
-- orchestration trace persistence
+- Expand pytest suites for:
+- full permission matrix (groups + shared visibility + ownership transitions)
+- orchestration trace persistence to DB (`orchestrator_runs`)
 - Introduce brand-governance policy checks in evaluator gating
 
 ### Near-term
 - Extract front-end from embedded HTML to TS component app
 - Add queue-backed async jobs and status polling
-- Connector read pipelines and normalized metric model
+- Normalized internal metric model and import tools (manual ingestion)
 
 ### Mid-term
 - PostgreSQL migration path (with migration tooling)
