@@ -5564,43 +5564,120 @@ EXPERIMENTS_HTML = """
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
     :root {
-      --bg:#eef4ff;
-      --line:#d6dfec;
-      --line-strong:#bfcee3;
-      --txt:#0f1b2d;
-      --muted:#55657d;
-      --accent:#0a67d3;
+      --bg:#dce7f5;
+      --bg-soft:#dceee7;
+      --line:rgba(170,186,209,.55);
+      --line-strong:rgba(136,160,191,.68);
+      --txt:#102037;
+      --muted:#4f647f;
+      --accent:#0b6fde;
       --ok:#0f766e;
       --danger:#c53939;
-      --shadow:0 18px 36px rgba(16,32,62,.12);
+      --shadow:0 22px 44px rgba(17,35,62,.16);
     }
     * { box-sizing:border-box; }
     body {
       margin:0;
       font-family:"IBM Plex Sans","Segoe UI",sans-serif;
       background:
-        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
-        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
-        linear-gradient(160deg,#edf4ff,#f5fbf6);
+        radial-gradient(980px 580px at -4% -20%,#eef5ff 0%,transparent 62%),
+        radial-gradient(920px 520px at 104% -24%,#e8fff4 0%,transparent 64%),
+        radial-gradient(760px 480px at 50% 108%,#eaf1ff 0%,transparent 68%),
+        linear-gradient(160deg,var(--bg),var(--bg-soft));
       color:var(--txt);
+      min-height:100vh;
     }
-    .wrap { max-width:1240px; margin:16px auto; padding:0 14px; }
-    .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
-    .top h2 { margin:0; font-family:"Sora","IBM Plex Sans",sans-serif; }
-    .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-    .toolbar button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .layout { display:grid; grid-template-columns: 350px 1fr; gap:12px; }
+    body::before {
+      content:"";
+      position:fixed;
+      inset:-18%;
+      pointer-events:none;
+      background:
+        radial-gradient(520px 300px at 18% 24%,rgba(255,255,255,.42),transparent 70%),
+        radial-gradient(500px 280px at 82% 14%,rgba(255,255,255,.34),transparent 72%),
+        radial-gradient(600px 340px at 60% 84%,rgba(255,255,255,.24),transparent 74%);
+      filter:blur(16px) saturate(120%);
+      opacity:.9;
+      z-index:0;
+    }
+    .wrap {
+      max-width:1240px;
+      margin:14px auto;
+      padding:0 12px;
+      position:relative;
+      z-index:1;
+    }
+    .top {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      margin-bottom:10px;
+      padding:8px 10px;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.56);
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(22px) saturate(145%);
+    }
+    .top h2 {
+      margin:0;
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:19px;
+      letter-spacing:.1px;
+    }
+    .toolbar {
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+    .lang {
+      display:flex;
+      gap:6px;
+      padding:4px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:rgba(255,255,255,.52);
+      backdrop-filter: blur(14px);
+    }
+    .lang button {
+      width:auto;
+      padding:5px 10px;
+      border-radius:999px;
+      border:0;
+      box-shadow:none;
+      background:transparent;
+    }
+    .lang button.active {
+      background:var(--accent);
+      color:#fff;
+    }
+    .top-tabs {
+      display:flex;
+      gap:6px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .tab-btn {
+      width:auto;
+      padding:6px 9px;
+      font-size:12px;
+      border-radius:10px;
+    }
+    .layout { display:grid; grid-template-columns: 320px 1fr; gap:10px; }
     .card {
-      background:rgba(255,255,255,.88);
+      background:rgba(255,255,255,.56);
       border:1px solid var(--line);
       border-radius:18px;
-      padding:14px;
+      padding:12px;
       box-shadow:var(--shadow);
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(22px) saturate(145%);
     }
-    .card h3 { margin:0 0 10px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; }
+    .card h3 { margin:0 0 8px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:16px; }
     label {
-      font-size:12px;
+      font-size:11px;
       color:var(--muted);
       display:block;
       margin-bottom:4px;
@@ -5609,16 +5686,17 @@ EXPERIMENTS_HTML = """
     input, select, textarea, button {
       width:100%;
       box-sizing:border-box;
-      padding:9px 10px;
-      border-radius:11px;
+      padding:8px 9px;
+      border-radius:10px;
       border:1px solid var(--line);
       font-family:inherit;
       color:var(--txt);
-      background:#fff;
+      background:rgba(255,255,255,.62);
+      backdrop-filter: blur(12px) saturate(130%);
       transition:.16s ease;
     }
     textarea {
-      min-height:96px;
+      min-height:90px;
       font-family:"IBM Plex Mono",ui-monospace,monospace;
       font-size:12px;
       resize:vertical;
@@ -5635,55 +5713,55 @@ EXPERIMENTS_HTML = """
       display:flex;
       flex-direction:column;
       gap:8px;
-      max-height:320px;
+      max-height:620px;
       overflow:auto;
       padding-right:2px;
-      margin-bottom:12px;
+      margin-bottom:8px;
     }
     .item {
       border:1px solid var(--line);
-      border-radius:12px;
-      padding:9px;
+      border-radius:11px;
+      padding:8px;
       cursor:pointer;
-      background:#fff;
+      background:rgba(255,255,255,.62);
       transition:.16s ease;
     }
     .item:hover { transform:translateY(-1px); border-color:var(--line-strong); }
     .item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
-    .item .name { font-weight:700; font-size:14px; }
-    .item .meta { color:var(--muted); font-size:12px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+    .item .name { font-weight:700; font-size:13px; }
+    .item .meta { color:var(--muted); font-size:11px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
     .empty {
       border:1px dashed var(--line-strong);
       border-radius:12px;
-      padding:13px;
+      padding:12px;
       text-align:center;
       color:var(--muted);
-      background:rgba(255,255,255,.62);
+      background:rgba(255,255,255,.54);
       font-size:13px;
     }
-    .grid { display:grid; gap:10px; grid-template-columns:1fr 1fr; }
+    .grid { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
     .full { grid-column:1 / -1; }
     .section-title { margin:12px 0 8px; font-size:13px; font-weight:700; color:#1b2f4d; }
-    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
-    .actions button { width:auto; }
+    .actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; justify-content:flex-start; }
+    .actions button { width:auto; padding:6px 9px; font-size:12px; }
     .msg {
       font-size:12px;
-      margin-top:10px;
+      margin-top:8px;
       color:var(--ok);
       min-height:20px;
       border-radius:10px;
-      background:#f3fdf9;
+      background:rgba(243,253,249,.7);
       border:1px solid #bde9d9;
       padding:7px 10px;
     }
-    .warn { color:var(--danger); background:#fff6f6; border-color:#f0c9c9; }
+    .warn { color:var(--danger); background:rgba(255,246,246,.74); border-color:#f0c9c9; }
     #exp-detail-panel.hidden, #exp-detail-empty.hidden { display:none; }
     .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
     .variant-card {
       border:1px solid var(--line);
       border-radius:12px;
       padding:8px;
-      background:#fff;
+      background:rgba(255,255,255,.62);
       margin-bottom:8px;
     }
     .variant-card .key {
@@ -5698,6 +5776,9 @@ EXPERIMENTS_HTML = """
     *::-webkit-scrollbar-track { background:transparent; }
     @media (max-width: 1000px) {
       .layout { grid-template-columns:1fr; }
+      .top { flex-direction:column; align-items:flex-start; }
+      .toolbar { justify-content:flex-start; width:100%; }
+      .top-tabs { width:100%; }
       .grid { grid-template-columns:1fr; }
       .actions button { width:100%; }
     }
@@ -5708,13 +5789,17 @@ EXPERIMENTS_HTML = """
     <div class="top">
       <h2 data-i18n="title">实验中心</h2>
       <div class="toolbar">
-        <button id="lang-zh" onclick="setLang('zh')">中文</button>
-        <button id="lang-en" onclick="setLang('en')">EN</button>
-        <button onclick="gotoApp()" data-i18n="back">返回聊天</button>
-        <button onclick="gotoKB()" data-i18n="kb_nav">Knowledge Base 管理</button>
-        <button onclick="gotoGroups()" data-i18n="group_nav">组管理</button>
-        <button onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="admin_nav">用户管理</button>
-        <button onclick="logout()" data-i18n="logout">退出</button>
+        <div class="lang">
+          <button id="lang-zh" onclick="setLang('zh')">中文</button>
+          <button id="lang-en" onclick="setLang('en')">EN</button>
+        </div>
+        <div class="top-tabs">
+          <button class="tab-btn" onclick="gotoApp()" data-i18n="back">返回聊天</button>
+          <button class="tab-btn" onclick="gotoKB()" data-i18n="kb_nav">Knowledge Base 管理</button>
+          <button class="tab-btn" onclick="gotoGroups()" data-i18n="group_nav">组管理</button>
+          <button class="tab-btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="admin_nav">用户管理</button>
+          <button class="tab-btn" onclick="logout()" data-i18n="logout">退出</button>
+        </div>
       </div>
     </div>
 
