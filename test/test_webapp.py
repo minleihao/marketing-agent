@@ -67,6 +67,7 @@ def test_csrf_allows_mutation_with_token(webapp_module):
         assert res.status_code == 200, res.text
         payload = res.json()
         assert payload["task_mode"] == "chat"
+        assert payload["thinking_depth"] == "low"
         assert payload["id"] > 0
 
 
@@ -81,6 +82,35 @@ def test_create_conversation_uses_english_default_title_when_ui_language_en(weba
         assert res.status_code == 200, res.text
         payload = res.json()
         assert payload["title"] == "New Chat"
+
+
+def test_conversation_thinking_depth_create_and_update(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "depth_user")
+        create_res = client.post(
+            "/api/conversations",
+            json={"task_mode": "chat", "thinking_depth": "medium"},
+            headers=headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        created = create_res.json()
+        assert created["thinking_depth"] == "medium"
+
+        conv_id = created["id"]
+        patch_res = client.patch(
+            f"/api/conversations/{conv_id}/thinking-depth",
+            json={"thinking_depth": "high"},
+            headers=headers,
+        )
+        assert patch_res.status_code == 200, patch_res.text
+        assert patch_res.json()["thinking_depth"] == "high"
+
+        list_res = client.get("/api/conversations")
+        assert list_res.status_code == 200, list_res.text
+        rows = list_res.json()
+        row = next((item for item in rows if item["id"] == conv_id), None)
+        assert row is not None
+        assert row["thinking_depth"] == "high"
 
 
 def test_auto_renames_english_default_title_on_first_message(webapp_module):
@@ -108,6 +138,34 @@ def test_auto_renames_english_default_title_on_first_message(webapp_module):
         conversation = next((row for row in rows if row["id"] == conversation_id), None)
         assert conversation is not None
         assert conversation["title"] == "Launch plan for Q2 campaign"[:30]
+
+
+def test_send_message_passes_thinking_depth_to_runtime(webapp_module):
+    captured = {}
+
+    def fake_invoke(payload):
+        captured["payload"] = payload
+        return {"result": "assistant reply"}
+
+    webapp_module.invoke = fake_invoke
+
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "depth_runtime_user")
+        conv_res = client.post(
+            "/api/conversations",
+            json={"task_mode": "chat", "thinking_depth": "high"},
+            headers=headers,
+        )
+        assert conv_res.status_code == 200, conv_res.text
+        conversation_id = conv_res.json()["id"]
+
+        msg_res = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"content": "hello"},
+            headers=headers,
+        )
+        assert msg_res.status_code == 200, msg_res.text
+        assert captured["payload"]["tool_args"]["thinking_depth"] == "high"
 
 
 def test_cannot_bind_private_kb_owned_by_other_user(webapp_module):

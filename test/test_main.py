@@ -97,6 +97,46 @@ def test_invoke_uses_selected_model(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "thinking_depth, expected_multiplier",
+    [
+        ("medium", 2),
+        ("high", 4),
+    ],
+)
+def test_invoke_uses_thinking_depth_token_multiplier(monkeypatch, thinking_depth, expected_multiplier):
+    used = {}
+
+    def fake_get_agent(_model_id: str):
+        raise AssertionError("default agent path should not be used for medium/high depth")
+
+    def fake_get_agent_with_max_tokens(model_id: str, max_tokens: int):
+        used["model_id"] = model_id
+        used["max_tokens"] = max_tokens
+
+        def fake_agent(_prompt: str):
+            return SimpleNamespace(message="ok")
+
+        return fake_agent
+
+    monkeypatch.setattr(main, "_get_agent", fake_get_agent)
+    monkeypatch.setattr(main, "_get_agent_with_max_tokens", fake_get_agent_with_max_tokens)
+
+    result = main.invoke(
+        {"prompt": "hi", "tool_args": {"model_id": "us.amazon.nova-lite-v1:0", "thinking_depth": thinking_depth}}
+    )
+
+    assert result == {"result": "ok"}
+    assert used["model_id"] == "us.amazon.nova-lite-v1:0"
+    assert used["max_tokens"] == main.DEFAULT_MAX_TOKENS * expected_multiplier
+
+
+def test_invoke_rejects_invalid_thinking_depth():
+    result = main.invoke({"prompt": "hi", "tool_args": {"thinking_depth": "ultra"}})
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert "`thinking_depth` must be one of:" in result["error"]["message"]
+
+
+@pytest.mark.parametrize(
     "payload, expected_message",
     [
         (None, "Payload must be a JSON object."),

@@ -68,6 +68,8 @@ SUPPORTED_MODELS = [
     "us.amazon.nova-pro-v1:0",
 ]
 TASK_MODES = {"chat", "marketing"}
+THINKING_DEPTH_LEVELS = {"low", "medium", "high"}
+DEFAULT_THINKING_DEPTH = "low"
 DEFAULT_CONVERSATION_TITLES = {"新对话", "新营销任务", "New Chat", "New Marketing Task"}
 VISIBILITY_LEVELS = {"private", "task", "company"}
 GROUP_TYPES = {"task", "company"}
@@ -136,6 +138,7 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 model_id TEXT NOT NULL DEFAULT 'us.anthropic.claude-sonnet-4-6',
                 task_mode TEXT NOT NULL DEFAULT 'chat',
+                thinking_depth TEXT NOT NULL DEFAULT 'low',
                 visibility TEXT NOT NULL DEFAULT 'private',
                 share_group_id INTEGER,
                 created_at TEXT NOT NULL,
@@ -287,6 +290,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE conversations ADD COLUMN kb_version INTEGER")
         if "task_mode" not in conversation_cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'chat'")
+        if "thinking_depth" not in conversation_cols:
+            conn.execute(
+                f"ALTER TABLE conversations ADD COLUMN thinking_depth TEXT NOT NULL DEFAULT '{DEFAULT_THINKING_DEPTH}'"
+            )
         if "visibility" not in conversation_cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
         if "share_group_id" not in conversation_cols:
@@ -820,6 +827,13 @@ def _normalize_task_mode(raw: str | None) -> str:
     return mode
 
 
+def _normalize_thinking_depth(raw: str | None) -> str:
+    depth = (raw or DEFAULT_THINKING_DEPTH).strip().lower()
+    if depth not in THINKING_DEPTH_LEVELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported thinking_depth: {depth}")
+    return depth
+
+
 def _is_default_conversation_title(title: str | None) -> bool:
     return (title or "").strip() in DEFAULT_CONVERSATION_TITLES
 
@@ -1095,6 +1109,7 @@ class LoginInput(BaseModel):
 class ConversationCreateInput(BaseModel):
     title: str | None = None
     task_mode: str | None = None
+    thinking_depth: str | None = None
     ui_language: str | None = None
     visibility: str | None = "private"
     share_group_id: int | None = None
@@ -1153,6 +1168,10 @@ class ConversationModeInput(BaseModel):
 
 class ConversationModelInput(BaseModel):
     model_id: str = Field(min_length=3, max_length=128)
+
+
+class ConversationThinkingDepthInput(BaseModel):
+    thinking_depth: str
 
 
 class ConversationVisibilityInput(BaseModel):
@@ -1480,32 +1499,55 @@ APP_HTML = """
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
     :root {
-      --bg:#edf4ff;
-      --bg-soft:#f4fbf7;
-      --pane:rgba(255,255,255,.86);
+      --bg:#dce7f5;
+      --bg-soft:#dceee7;
+      --pane:rgba(255,255,255,.56);
+      --pane-strong:rgba(255,255,255,.72);
       --pane-solid:#ffffff;
-      --line:#d6dfec;
-      --line-strong:#bfcee3;
-      --txt:#0f1b2d;
-      --muted:#53647c;
-      --accent:#0a67d3;
+      --line:rgba(170,186,209,.55);
+      --line-strong:rgba(136,160,191,.68);
+      --txt:#102037;
+      --muted:#4f647f;
+      --accent:#0b6fde;
       --accent-2:#0ea979;
       --danger:#cf3f3f;
-      --bot:#f4f8ff;
-      --user:#e9f8ef;
-      --shadow:0 18px 36px rgba(16,32,62,.12);
+      --bot:rgba(243,248,255,.72);
+      --user:rgba(233,248,239,.72);
+      --shadow:0 22px 44px rgba(17,35,62,.16);
+      --sidebar-width:320px;
     }
     * { box-sizing:border-box; }
     body {
       margin:0;
       font-family:"IBM Plex Sans","Segoe UI",sans-serif;
       background:
-        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
-        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
+        radial-gradient(980px 580px at -4% -20%,#eef5ff 0%,transparent 62%),
+        radial-gradient(920px 520px at 104% -24%,#e8fff4 0%,transparent 64%),
+        radial-gradient(760px 480px at 50% 108%,#eaf1ff 0%,transparent 68%),
         linear-gradient(160deg,var(--bg),var(--bg-soft));
       color:var(--txt);
       height:100vh;
       overflow:hidden;
+    }
+    body::before {
+      content:"";
+      position:fixed;
+      inset:-18%;
+      pointer-events:none;
+      background:
+        radial-gradient(520px 300px at 18% 24%,rgba(255,255,255,.42),transparent 70%),
+        radial-gradient(500px 280px at 82% 14%,rgba(255,255,255,.34),transparent 72%),
+        radial-gradient(600px 340px at 60% 84%,rgba(255,255,255,.24),transparent 74%);
+      filter:blur(16px) saturate(120%);
+      opacity:.9;
+      z-index:0;
+    }
+    body.sidebar-resizing {
+      user-select:none;
+      cursor:col-resize;
+    }
+    body.sidebar-resizing * {
+      cursor:col-resize !important;
     }
     .app-shell {
       height:100vh;
@@ -1514,13 +1556,15 @@ APP_HTML = """
       gap:8px;
       padding:8px;
       min-height:0;
+      position:relative;
+      z-index:1;
     }
     .global-bar {
       border:1px solid var(--line);
       border-radius:16px;
-      background:rgba(255,255,255,.86);
+      background:var(--pane);
       box-shadow:var(--shadow);
-      backdrop-filter: blur(10px);
+      backdrop-filter: blur(22px) saturate(145%);
       display:flex;
       justify-content:space-between;
       align-items:center;
@@ -1538,9 +1582,45 @@ APP_HTML = """
       min-height:0;
       height:100%;
       display:grid;
-      grid-template-columns:minmax(300px,340px) 1fr;
-      gap:10px;
+      grid-template-columns:minmax(220px,var(--sidebar-width)) 10px minmax(0,1fr);
+      gap:8px;
       min-width:0;
+      transition:grid-template-columns .18s ease;
+    }
+    .root.sidebar-collapsed {
+      grid-template-columns:0 14px minmax(0,1fr);
+      gap:6px;
+    }
+    .splitter {
+      border:1px solid rgba(160,179,204,.42);
+      border-radius:10px;
+      background:rgba(255,255,255,.34);
+      backdrop-filter: blur(14px);
+      cursor:col-resize;
+      position:relative;
+      transition:background .16s ease, border-color .16s ease;
+      min-height:0;
+    }
+    .splitter::before {
+      content:"";
+      position:absolute;
+      top:50%;
+      left:50%;
+      transform:translate(-50%, -50%);
+      width:3px;
+      height:46px;
+      border-radius:999px;
+      background:linear-gradient(180deg,rgba(102,128,162,.2),rgba(102,128,162,.7),rgba(102,128,162,.2));
+    }
+    .splitter:hover {
+      background:rgba(255,255,255,.52);
+      border-color:rgba(126,152,186,.66);
+    }
+    .root.sidebar-collapsed .splitter {
+      border:1px solid rgba(160,179,204,.42);
+      background:rgba(255,255,255,.5);
+      pointer-events:auto;
+      cursor:pointer;
     }
     .sidebar {
       border:1px solid var(--line);
@@ -1550,31 +1630,49 @@ APP_HTML = """
       display:flex;
       flex-direction:column;
       box-shadow:var(--shadow);
-      backdrop-filter: blur(10px);
+      backdrop-filter: blur(22px) saturate(145%);
       overflow:hidden;
       min-height:0;
+      min-width:0;
+      transition:opacity .16s ease, transform .16s ease, padding .16s ease, border-color .16s ease;
     }
-    .topline { display:block; margin-bottom:8px; }
-    .topline strong { font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; letter-spacing:.1px; display:block; margin-bottom:6px; }
+    .root.sidebar-collapsed .sidebar {
+      opacity:0;
+      transform:translateX(-8px);
+      pointer-events:none;
+      padding:0;
+      border-width:0;
+      box-shadow:none;
+    }
+    .topline { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
+    .topline-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .topline strong { font-family:"Sora","IBM Plex Sans",sans-serif; font-size:16px; letter-spacing:.1px; display:block; margin:0; }
+    .side-toggle-btn {
+      padding:4px 8px;
+      font-size:11px;
+      border-radius:9px;
+      white-space:nowrap;
+    }
     .quick-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
     .badge {
       font-size:12px;
       color:var(--muted);
       padding:7px 10px;
-      border:1px dashed var(--line-strong);
+      border:1px solid rgba(147,168,198,.44);
       border-radius:12px;
       margin-top:10px;
-      background:#f7fbff;
+      background:rgba(248,252,255,.56);
     }
     .btn {
       border:1px solid var(--line);
-      background:#fff;
+      background:rgba(255,255,255,.58);
       color:var(--txt);
       padding:7px 9px;
       border-radius:10px;
       cursor:pointer;
       font-weight:600;
       transition:.16s ease;
+      backdrop-filter: blur(14px) saturate(135%);
     }
     .btn:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 16px rgba(14,30,60,.08); }
     .btn:focus-visible { outline:none; box-shadow:0 0 0 3px rgba(10,103,211,.17); border-color:var(--accent); }
@@ -1597,7 +1695,7 @@ APP_HTML = """
       border:1px solid var(--line);
       border-radius:12px;
       padding:8px;
-      background:linear-gradient(180deg,#fff,#fdfefe);
+      background:linear-gradient(180deg,rgba(255,255,255,.72),rgba(255,255,255,.58));
       cursor:pointer;
       transition:.16s ease;
     }
@@ -1627,7 +1725,7 @@ APP_HTML = """
       letter-spacing:.2px;
     }
     .chat-time { font-size:12px; color:var(--muted); margin-top:4px; }
-    .lang { display:flex; gap:6px; padding:4px; border:1px solid var(--line); border-radius:999px; width:max-content; background:#fff; }
+    .lang { display:flex; gap:6px; padding:4px; border:1px solid var(--line); border-radius:999px; width:max-content; background:rgba(255,255,255,.52); backdrop-filter: blur(14px); }
     .lang .btn { padding:6px 10px; border-radius:999px; border:0; box-shadow:none; }
     .lang .btn:hover { transform:none; box-shadow:none; background:#f2f6fb; }
     .lang .btn.active { background:var(--accent); color:#fff; }
@@ -1639,15 +1737,15 @@ APP_HTML = """
       border-radius:24px;
       background:var(--pane);
       box-shadow:var(--shadow);
-      backdrop-filter: blur(10px);
+      backdrop-filter: blur(24px) saturate(150%);
       overflow:hidden;
       min-height:0;
       min-width:0;
     }
     .head {
       border-bottom:1px solid var(--line);
-      background:rgba(255,255,255,.86);
-      padding:8px 12px;
+      background:var(--pane-strong);
+      padding:6px 10px;
       display:flex;
       justify-content:space-between;
       align-items:center;
@@ -1655,46 +1753,47 @@ APP_HTML = """
     }
     .head strong {
       font-family:"Sora","IBM Plex Sans",sans-serif;
-      font-size:17px;
-      max-width:44%;
+      font-size:15px;
+      max-width:38%;
       overflow:hidden;
       text-overflow:ellipsis;
       white-space:nowrap;
     }
     .head-controls {
       display:grid;
-      grid-template-columns:repeat(2, minmax(170px, 1fr));
-      gap:6px 8px;
+      grid-template-columns:repeat(3, minmax(122px, 1fr));
+      gap:4px 6px;
       align-items:end;
-      width:min(760px, 100%);
+      width:min(820px, 100%);
     }
     .control {
       display:flex;
       flex-direction:column;
-      gap:3px;
+      gap:2px;
       min-width:0;
     }
-    .control label { font-size:11px; color:var(--muted); line-height:1.15; }
+    .control label { font-size:10px; color:var(--muted); line-height:1.05; }
     .control select {
       border:1px solid var(--line);
-      border-radius:10px;
-      padding:5px 8px;
-      background:#fff;
+      border-radius:9px;
+      padding:4px 8px;
+      background:rgba(255,255,255,.6);
       min-width:0;
       color:var(--txt);
-      height:34px;
+      height:30px;
+      font-size:12px;
     }
     .head-actions {
       grid-column:1 / -1;
       display:flex;
       align-items:center;
-      gap:6px;
+      gap:5px;
       flex-wrap:wrap;
-      margin-top:1px;
+      margin-top:0;
     }
     .head-actions .btn {
-      padding:6px 8px;
-      font-size:12px;
+      padding:5px 7px;
+      font-size:11px;
     }
     .messages {
       padding:12px;
@@ -1797,7 +1896,7 @@ APP_HTML = """
     .msg-content a:hover { border-bottom-style:solid; }
     .trace-panel {
       border-top:1px solid var(--line);
-      background:rgba(255,255,255,.92);
+      background:rgba(255,255,255,.48);
       padding:8px 10px;
       max-height:34vh;
       overflow:auto;
@@ -1859,7 +1958,7 @@ APP_HTML = """
       border:1px solid var(--line);
       border-radius:10px;
       padding:8px;
-      background:#fff;
+      background:rgba(255,255,255,.62);
     }
     .trace-stage h4 {
       margin:0 0 6px;
@@ -1879,8 +1978,8 @@ APP_HTML = """
       font-size:12px;
       line-height:1.55;
       color:var(--txt);
-      background:#f9fcff;
-      border:1px solid #e2ebf7;
+      background:rgba(248,252,255,.58);
+      border:1px solid rgba(211,225,243,.7);
       border-radius:8px;
       padding:7px 8px;
       margin-top:6px;
@@ -1917,14 +2016,20 @@ APP_HTML = """
     }
     .composer {
       border-top:1px solid var(--line);
-      background:rgba(255,255,255,.92);
+      background:rgba(255,255,255,.5);
       padding:8px 10px;
+      height:230px;
+      min-height:144px;
       max-height:34vh;
       overflow:auto;
+      resize:vertical;
     }
     .composer.compact {
+      height:56px;
+      min-height:0;
       max-height:56px;
       overflow:hidden;
+      resize:none;
     }
     .composer-head {
       display:flex;
@@ -1948,16 +2053,17 @@ APP_HTML = """
       border:1px solid var(--line);
       border-radius:10px;
       padding:8px 10px;
-      background:#fff;
+      background:rgba(255,255,255,.62);
       color:var(--txt);
       font-family:inherit;
       transition:.16s ease;
     }
     textarea:focus, input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); }
     textarea { min-height:70px; resize:vertical; }
+    #input { min-height:88px; max-height:34vh; }
     .brief-card {
       border:1px solid var(--line);
-      background:linear-gradient(180deg,#fafdff,#f8fdfb);
+      background:linear-gradient(180deg,rgba(250,253,255,.62),rgba(248,253,251,.54));
       border-radius:12px;
       padding:8px;
       margin-bottom:6px;
@@ -1979,7 +2085,7 @@ APP_HTML = """
       gap:6px;
       border:1px solid var(--line);
       border-radius:999px;
-      background:#fff;
+      background:rgba(255,255,255,.62);
       padding:5px 10px;
       font-size:12px;
       color:var(--txt);
@@ -2000,7 +2106,7 @@ APP_HTML = """
       font-size:12px;
       padding:7px;
       border-radius:10px;
-      background:#fff;
+      background:rgba(255,255,255,.62);
     }
     .doc-list { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
     .doc-pill {
@@ -2011,7 +2117,7 @@ APP_HTML = """
       border:1px solid var(--line);
       border-radius:999px;
       padding:4px 9px;
-      background:#fff;
+      background:rgba(255,255,255,.64);
       box-shadow:0 6px 14px rgba(13,27,48,.05);
     }
     .doc-pill button {
@@ -2029,7 +2135,7 @@ APP_HTML = """
       border-radius:14px;
       padding:14px;
       color:var(--muted);
-      background:rgba(255,255,255,.66);
+      background:rgba(255,255,255,.54);
       text-align:center;
       font-size:13px;
     }
@@ -2043,10 +2149,10 @@ APP_HTML = """
     *::-webkit-scrollbar-track { background:transparent; }
 
     @media (max-width: 1200px) {
-      .root { grid-template-columns:300px 1fr; }
-      .head strong { max-width:100%; font-size:18px; }
+      .root { grid-template-columns:minmax(220px, 300px) 8px minmax(0,1fr); }
+      .head strong { max-width:100%; font-size:16px; }
       .head { flex-direction:column; align-items:flex-start; }
-      .head-controls { width:100%; }
+      .head-controls { width:100%; grid-template-columns:repeat(2, minmax(130px, 1fr)); }
     }
     @media (max-width: 900px) {
       body { background:linear-gradient(160deg,var(--bg),var(--bg-soft)); }
@@ -2054,8 +2160,10 @@ APP_HTML = """
       .global-bar { border-radius:12px; padding:7px; }
       .global-title { font-size:14px; }
       .root { grid-template-columns:1fr; gap:8px; }
+      .root.sidebar-collapsed { grid-template-columns:1fr; }
       .sidebar, .main { border-radius:16px; }
       .sidebar { height:36vh; border-right:1px solid var(--line); }
+      .splitter, .side-toggle-btn { display:none; }
       .global-actions { width:100%; justify-content:flex-start; }
       .quick-actions { grid-template-columns:1fr; }
       .head-controls { grid-template-columns:1fr; }
@@ -2088,10 +2196,13 @@ APP_HTML = """
       </div>
     </div>
 
-    <div class="root">
+    <div class="root" id="app-root">
       <aside class="sidebar">
         <div class="topline">
-          <strong data-i18n="conversation_list">会话记录</strong>
+          <div class="topline-row">
+            <strong data-i18n="conversation_list">会话记录</strong>
+            <button class="btn side-toggle-btn" type="button" id="toggle-sidebar-btn" onclick="toggleSidebar()">收起侧栏</button>
+          </div>
           <div class="quick-actions">
             <button class="btn accent" onclick="createConversation('chat')" data-i18n="new_chat_conversation">+ 新对话</button>
             <button class="btn" onclick="createConversation('marketing')" data-i18n="new_marketing_conversation">+ 营销任务</button>
@@ -2100,6 +2211,7 @@ APP_HTML = """
         <div class="badge" id="user-badge"></div>
         <div class="chat-list" id="chat-list"></div>
       </aside>
+      <div class="splitter" id="sidebar-splitter" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
 
       <section class="main">
         <div class="head">
@@ -2108,6 +2220,14 @@ APP_HTML = """
             <div class="control">
               <label for="model-select" data-i18n="model_label">模型</label>
               <select id="model-select" onchange="changeModel()"></select>
+            </div>
+            <div class="control">
+              <label for="thinking-depth-select" data-i18n="thinking_depth_label">思考深度</label>
+              <select id="thinking-depth-select" onchange="changeThinkingDepth()">
+                <option value="low" data-i18n="thinking_depth_low">标准（1x）</option>
+                <option value="medium" data-i18n="thinking_depth_medium">深入（2x）</option>
+                <option value="high" data-i18n="thinking_depth_high">深度（4x）</option>
+              </select>
             </div>
             <div class="control">
               <label for="task-mode-select" data-i18n="mode_label">任务模式</label>
@@ -2279,11 +2399,17 @@ const I18N = {
     page_title: 'Marketing Copilot',
     app_brand: 'Marketing Copilot',
     conversation_list: '会话记录',
+    sidebar_collapse: '收起侧栏',
+    sidebar_expand: '展开侧栏',
     new_conversation: '+ 新对话',
     new_chat_conversation: '+ 新对话',
     new_marketing_conversation: '+ 营销任务',
     no_conversation: '未选择会话',
     model_label: '模型',
+    thinking_depth_label: '思考深度',
+    thinking_depth_low: '标准（1x）',
+    thinking_depth_medium: '深入（2x）',
+    thinking_depth_high: '深度（4x）',
     mode_label: '任务模式',
     kb_label: '品牌知识库',
     kb_version_label: '版本',
@@ -2402,11 +2528,17 @@ const I18N = {
     page_title: 'Marketing Copilot',
     app_brand: 'Marketing Copilot',
     conversation_list: 'Conversations',
+    sidebar_collapse: 'Collapse Sidebar',
+    sidebar_expand: 'Expand Sidebar',
     new_conversation: '+ New Chat',
     new_chat_conversation: '+ Chat',
     new_marketing_conversation: '+ Marketing',
     no_conversation: 'No conversation selected',
     model_label: 'Model',
+    thinking_depth_label: 'Thinking Depth',
+    thinking_depth_low: 'Standard (1x)',
+    thinking_depth_medium: 'Deep (2x)',
+    thinking_depth_high: 'Maximum (4x)',
     mode_label: 'Task Mode',
     kb_label: 'Brand KB',
     kb_version_label: 'Version',
@@ -2541,6 +2673,17 @@ let activeTraceRunId = null;
 let tracePanelVisible = false;
 let traceCompact = false;
 let composerCollapsed = false;
+const SIDEBAR_WIDTH_MIN = 240;
+const SIDEBAR_WIDTH_MAX = 520;
+const SIDEBAR_WIDTH_KEY = 'nova_sidebar_width';
+const SIDEBAR_COLLAPSED_KEY = 'nova_sidebar_collapsed';
+let sidebarWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY) || 320);
+if (!Number.isFinite(sidebarWidth)) {
+  sidebarWidth = 320;
+}
+let sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+let sidebarResizerBound = false;
+let sidebarResizing = false;
 
 function currentConversation() {
   return conversations.find((x) => x.id === activeConversationId) || null;
@@ -2548,6 +2691,12 @@ function currentConversation() {
 
 function defaultConversationTitle(taskMode='chat') {
   return taskMode === 'marketing' ? t('default_marketing_title') : t('default_chat_title');
+}
+
+function normalizeThinkingDepth(value) {
+  const depth = String(value || '').toLowerCase();
+  if (depth === 'medium' || depth === 'high') return depth;
+  return 'low';
 }
 
 function isSystemDefaultConversationTitle(title) {
@@ -2574,6 +2723,85 @@ function setLang(lang) {
   currentLang = lang === 'en' ? 'en' : 'zh';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
+}
+
+function clampSidebarWidth(width) {
+  const num = Number(width);
+  if (!Number.isFinite(num)) return 320;
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, num));
+}
+
+function syncSidebarToggleButton() {
+  const btn = document.getElementById('toggle-sidebar-btn');
+  if (!btn) return;
+  btn.textContent = sidebarCollapsed ? t('sidebar_expand') : t('sidebar_collapse');
+}
+
+function applySidebarLayout() {
+  const root = document.getElementById('app-root');
+  if (!root) return;
+  if (window.innerWidth <= 900) {
+    root.classList.remove('sidebar-collapsed');
+    root.style.removeProperty('--sidebar-width');
+    syncSidebarToggleButton();
+    return;
+  }
+  sidebarWidth = clampSidebarWidth(sidebarWidth);
+  root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+  root.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+  syncSidebarToggleButton();
+}
+
+function toggleSidebar() {
+  if (window.innerWidth <= 900) return;
+  sidebarCollapsed = !sidebarCollapsed;
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0');
+  applySidebarLayout();
+}
+
+function bindSidebarResizer() {
+  if (sidebarResizerBound) return;
+  sidebarResizerBound = true;
+  const root = document.getElementById('app-root');
+  const splitter = document.getElementById('sidebar-splitter');
+  if (!root || !splitter) return;
+
+  const updateWidthFromClientX = (clientX) => {
+    const rect = root.getBoundingClientRect();
+    sidebarWidth = clampSidebarWidth(clientX - rect.left);
+    root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+  };
+
+  splitter.addEventListener('mousedown', (event) => {
+    if (window.innerWidth <= 900 || sidebarCollapsed) return;
+    sidebarResizing = true;
+    document.body.classList.add('sidebar-resizing');
+    updateWidthFromClientX(event.clientX);
+    event.preventDefault();
+  });
+
+  splitter.addEventListener('click', () => {
+    if (window.innerWidth <= 900) return;
+    if (sidebarCollapsed && !sidebarResizing) {
+      toggleSidebar();
+    }
+  });
+
+  window.addEventListener('mousemove', (event) => {
+    if (!sidebarResizing) return;
+    updateWidthFromClientX(event.clientX);
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!sidebarResizing) return;
+    sidebarResizing = false;
+    document.body.classList.remove('sidebar-resizing');
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+  });
+
+  window.addEventListener('resize', () => {
+    applySidebarLayout();
+  });
 }
 
 function applyI18n() {
@@ -2603,12 +2831,15 @@ function applyI18n() {
   if (emptyMsg && !document.querySelector('#messages .msg')) {
     emptyMsg.textContent = t('messages_empty');
   }
+  syncThinkingDepthSelect();
   syncTaskModeSelect();
   syncTaskModeUI();
   syncConversationVisibilityUI();
   syncTraceToggleButton();
   syncTraceCompactButton();
   syncComposerToggleButton();
+  syncSidebarToggleButton();
+  applySidebarLayout();
   renderTracePanel();
 }
 
@@ -3110,6 +3341,20 @@ function syncModelSelect() {
   }
 }
 
+function syncThinkingDepthSelect() {
+  const select = document.getElementById('thinking-depth-select');
+  const active = currentConversation();
+  if (!activeConversationId || !active) {
+    if (!select.value) {
+      select.value = 'low';
+    }
+    select.disabled = false;
+    return;
+  }
+  select.disabled = false;
+  select.value = normalizeThinkingDepth(active.thinking_depth);
+}
+
 function syncTaskModeSelect() {
   const select = document.getElementById('task-mode-select');
   const active = currentConversation();
@@ -3195,6 +3440,7 @@ async function loadModels() {
   const data = await api('/api/models');
   models = data.models || [];
   syncModelSelect();
+  syncThinkingDepthSelect();
   syncTaskModeSelect();
 }
 
@@ -3590,6 +3836,7 @@ async function loadConversations() {
     return;
   }
   syncModelSelect();
+  syncThinkingDepthSelect();
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
@@ -3601,10 +3848,12 @@ async function loadConversations() {
 
 async function createConversation(taskMode='chat') {
   const localizedDefaultTitle = defaultConversationTitle(taskMode);
+  const selectedDepth = normalizeThinkingDepth(document.getElementById('thinking-depth-select')?.value);
   const created = await api('/api/conversations', {
     method:'POST',
     body:JSON.stringify({
       task_mode: taskMode,
+      thinking_depth: selectedDepth,
       title: localizedDefaultTitle,
       ui_language: currentLang,
       visibility: 'private',
@@ -3621,6 +3870,7 @@ async function createConversation(taskMode='chat') {
   activeDocuments = [];
   renderDocuments();
   syncModelSelect();
+  syncThinkingDepthSelect();
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
@@ -3637,6 +3887,7 @@ async function openConversation(id) {
   await loadDocuments(id);
   await loadOrchestratorRuns(id);
   syncModelSelect();
+  syncThinkingDepthSelect();
   syncTaskModeSelect();
   await syncKBSelects();
   syncTaskModeUI();
@@ -3651,6 +3902,20 @@ async function changeModel() {
     body: JSON.stringify({ model_id: modelId })
   });
   conversations = conversations.map(c => c.id === activeConversationId ? {...c, model_id: data.model_id} : c);
+}
+
+async function changeThinkingDepth() {
+  if (!activeConversationId) return;
+  const thinkingDepth = normalizeThinkingDepth(document.getElementById('thinking-depth-select').value);
+  const data = await api(`/api/conversations/${activeConversationId}/thinking-depth`, {
+    method:'PATCH',
+    body: JSON.stringify({ thinking_depth: thinkingDepth })
+  });
+  conversations = conversations.map((c) => (
+    c.id === activeConversationId
+      ? {...c, thinking_depth: data.thinking_depth, updated_at: data.updated_at}
+      : c
+  ));
 }
 
 async function changeTaskMode() {
@@ -3683,6 +3948,7 @@ async function deleteConversation() {
     activeDocuments = [];
     renderDocuments();
     syncModelSelect();
+    syncThinkingDepthSelect();
     syncTaskModeSelect();
     await syncKBSelects();
     syncTaskModeUI();
@@ -3831,6 +4097,7 @@ function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init(){
   try {
+    bindSidebarResizer();
     applyI18n();
     await loadCsrfToken();
     await loadMe();
@@ -6842,7 +7109,7 @@ def list_conversations(request: Request) -> Any:
     with db_conn() as conn:
         rows = conn.execute(
             """
-            SELECT c.id, c.user_id, c.title, c.model_id, c.task_mode, c.visibility, c.share_group_id,
+            SELECT c.id, c.user_id, c.title, c.model_id, c.task_mode, c.thinking_depth, c.visibility, c.share_group_id,
                    g.name AS share_group_name, u.username AS owner_username,
                    c.kb_key, c.kb_version, c.created_at, c.updated_at
             FROM conversations c
@@ -6863,6 +7130,7 @@ def list_conversations(request: Request) -> Any:
 def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     user = must_login(request)
     task_mode = _normalize_task_mode(body.task_mode)
+    thinking_depth = _normalize_thinking_depth(body.thinking_depth)
     visibility, share_group_id = _validate_share_group_for_user(user["id"], body.visibility, body.share_group_id)
     lang = (body.ui_language or "").strip().lower()
     is_english = lang.startswith("en")
@@ -6876,10 +7144,12 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     with db_conn() as conn:
         cur = conn.execute(
             """
-            INSERT INTO conversations (user_id, title, model_id, task_mode, visibility, share_group_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO conversations (
+                user_id, title, model_id, task_mode, thinking_depth, visibility, share_group_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user["id"], title[:120], model_id, task_mode, visibility, share_group_id, now, now),
+            (user["id"], title[:120], model_id, task_mode, thinking_depth, visibility, share_group_id, now, now),
         )
         conv_id = cur.lastrowid
     return {
@@ -6889,6 +7159,7 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
         "title": title[:120],
         "model_id": model_id,
         "task_mode": task_mode,
+        "thinking_depth": thinking_depth,
         "visibility": visibility,
         "share_group_id": share_group_id,
         "share_group_name": None,
@@ -6945,6 +7216,22 @@ def update_conversation_model(conversation_id: int, body: ConversationModelInput
             (model_id, now, conversation_id),
         )
     return {"ok": True, "model_id": model_id, "updated_at": now}
+
+
+@app.patch("/api/conversations/{conversation_id}/thinking-depth")
+def update_conversation_thinking_depth(
+    conversation_id: int, body: ConversationThinkingDepthInput, request: Request
+) -> Any:
+    user = must_login(request)
+    conversation_owner_or_404(user["id"], conversation_id)
+    thinking_depth = _normalize_thinking_depth(body.thinking_depth)
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE conversations SET thinking_depth = ?, updated_at = ? WHERE id = ?",
+            (thinking_depth, now, conversation_id),
+        )
+    return {"ok": True, "thinking_depth": thinking_depth, "updated_at": now}
 
 
 @app.patch("/api/conversations/{conversation_id}/title")
@@ -7122,6 +7409,7 @@ def export_conversation(conversation_id: int, request: Request) -> Any:
         f"- Owner user id: {conversation['user_id']}",
         f"- Task mode: {mode}",
         f"- Model: {conversation['model_id']}",
+        f"- Thinking depth: {conversation['thinking_depth'] if 'thinking_depth' in conversation.keys() else DEFAULT_THINKING_DEPTH}",
         f"- Visibility: {conversation['visibility'] or 'private'}",
         f"- Share group id: {conversation['share_group_id'] if conversation['share_group_id'] is not None else 'none'}",
         f"- Exported at: {now_utc().isoformat()}",
@@ -7256,6 +7544,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "ui_language": body.ui_language,
         "output_sections": body.output_sections,
         "model_id": conversation["model_id"],
+        "thinking_depth": conversation["thinking_depth"] if "thinking_depth" in conversation.keys() else DEFAULT_THINKING_DEPTH,
         "include_trace": True,
     }
     extra_parts = []

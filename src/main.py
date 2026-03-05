@@ -6,7 +6,7 @@ from typing import Any, Dict
 from dotenv import load_dotenv
 from strands import Agent
 
-from model.load import DEFAULT_MODEL_ID, load_model
+from model.load import DEFAULT_MAX_TOKENS, DEFAULT_MODEL_ID, load_model
 from prompts import (
     SYSTEM_PROMPT,
     ORCHESTRATOR_JSON_TEMPLATE,
@@ -51,9 +51,15 @@ OUTPUT_SECTION_ALIASES = {
     "copy": "generator",
     "eval": "evaluation",
 }
+THINKING_DEPTH_MULTIPLIERS = {
+    "low": 1,
+    "medium": 2,
+    "high": 4,
+}
 ORCHESTRATOR_ENABLED = os.getenv("NOVARED_ORCHESTRATOR_ENABLED", "1").strip() not in {"0", "false", "False"}
 
 _agent_cache: dict[str, Agent] = {}
+_agent_profile_cache: dict[tuple[str, int], Agent] = {}
 
 
 def _get_agent(model_id: str) -> Agent:
@@ -63,6 +69,31 @@ def _get_agent(model_id: str) -> Agent:
             system_prompt=SYSTEM_PROMPT,
         )
     return _agent_cache[model_id]
+
+
+def _get_agent_with_max_tokens(model_id: str, max_tokens: int) -> Agent:
+    cache_key = (model_id, max_tokens)
+    if cache_key not in _agent_profile_cache:
+        _agent_profile_cache[cache_key] = Agent(
+            model=load_model(model_id=model_id, max_tokens=max_tokens),
+            system_prompt=SYSTEM_PROMPT,
+        )
+    return _agent_profile_cache[cache_key]
+
+
+def _normalize_thinking_depth(raw_depth: str) -> str:
+    thinking_depth = raw_depth.strip().lower() or "low"
+    if thinking_depth not in THINKING_DEPTH_MULTIPLIERS:
+        allowed = ", ".join(THINKING_DEPTH_MULTIPLIERS.keys())
+        raise ValueError(f"`thinking_depth` must be one of: {allowed}.")
+    return thinking_depth
+
+
+def _max_tokens_for_thinking_depth(thinking_depth: str) -> int:
+    multiplier = THINKING_DEPTH_MULTIPLIERS.get(thinking_depth, 1)
+    return DEFAULT_MAX_TOKENS * multiplier
+
+
 app = BedrockAgentCoreApp()
 
 
@@ -662,6 +693,7 @@ def invoke(payload: Dict[str, Any]):
          "objective": "<lead gen | sign-up | brand awareness | event registration | etc.>",
          "brand_voice": "<tone description>",
          "extra_requirements": "<additional constraints or instructions>",
+         "thinking_depth": "low | medium | high",
          "output_sections": ["brief", "plan", "generator", "evaluation"]
       }
     }
@@ -683,7 +715,9 @@ def invoke(payload: Dict[str, Any]):
         ui_language = _ensure_string(marketing_context.get("ui_language"), "ui_language", default="").lower()
         extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
         model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
+        thinking_depth = _ensure_string(marketing_context.get("thinking_depth"), "thinking_depth", default="low")
         model_id = _normalize_model_id(model_id)
+        thinking_depth = _normalize_thinking_depth(thinking_depth)
         include_trace = bool(marketing_context.get("include_trace", False))
         output_sections = _normalize_output_sections(marketing_context.get("output_sections"))
 
@@ -702,7 +736,11 @@ def invoke(payload: Dict[str, Any]):
 
     try:
         language_rules = language_instruction(ui_language)
-        agent = _get_agent(model_id)
+        max_tokens = _max_tokens_for_thinking_depth(thinking_depth)
+        if max_tokens == DEFAULT_MAX_TOKENS:
+            agent = _get_agent(model_id)
+        else:
+            agent = _get_agent_with_max_tokens(model_id, max_tokens)
         orchestrator_payload: dict[str, Any] | None = None
 
         if has_structured_context:

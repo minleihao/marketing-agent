@@ -4,10 +4,10 @@ DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 8192
 
 
-def load_model(model_id: str = DEFAULT_MODEL_ID):
+def load_model(model_id: str = DEFAULT_MODEL_ID, max_tokens: int = DEFAULT_MAX_TOKENS):
     kwargs = {
         "model_id": model_id,
-        "max_tokens": DEFAULT_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": 0.7,
         "top_p": 0.9,
     }
