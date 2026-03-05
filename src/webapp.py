@@ -6053,15 +6053,32 @@ async function api(url, options={}) {
   const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error(data.detail || t('request_failed'));
+  if (!res.ok) {
+    const err = new Error(data.detail || t('request_failed'));
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
 async function loadCsrfToken() {
   const res = await fetch('/api/csrf');
-  if (!res.ok) throw new Error('csrf');
+  if (!res.ok) {
+    let data = {};
+    try { data = await res.json(); } catch {}
+    const err = new Error(data.detail || 'csrf');
+    err.status = res.status;
+    throw err;
+  }
   const data = await res.json();
   csrfToken = data.csrf_token || '';
+}
+
+function isAuthError(err) {
+  const status = err && typeof err === 'object' ? err.status : null;
+  if (status === 401 || status === 403) return true;
+  const msg = String((err && err.message) || '').toLowerCase();
+  return msg.includes('unauthorized') || msg.includes('forbidden');
 }
 
 function renderConversationSelect() {
@@ -6301,18 +6318,35 @@ function gotoAdmin() { location.href = '/admin'; }
   applyI18n();
   try {
     await loadCsrfToken();
-    [me, conversations] = await Promise.all([
-      api('/api/me'),
-      api('/api/conversations'),
-    ]);
+    me = await api('/api/me');
     if (me && me.is_admin) {
       document.getElementById('admin-btn').style.display = 'inline-block';
     }
+    try {
+      conversations = await api('/api/conversations');
+    } catch (e) {
+      if (isAuthError(e)) throw e;
+      conversations = [];
+      setMsg(`${t('request_failed')}: ${e.message}`, true);
+    }
     renderConversationSelect();
-    await refreshExperiments();
-    renderExperimentDetail();
-  } catch {
-    location.href = '/';
+    try {
+      await refreshExperiments();
+      renderExperimentDetail();
+    } catch (e) {
+      if (isAuthError(e)) throw e;
+      experiments = [];
+      activeExperiment = null;
+      renderExperiments();
+      renderExperimentDetail();
+      setMsg(`${t('request_failed')}: ${e.message}`, true);
+    }
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    setMsg(`${t('request_failed')}: ${e.message}`, true);
   }
 })();
 </script>
