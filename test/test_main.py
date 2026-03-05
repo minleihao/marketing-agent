@@ -172,3 +172,63 @@ def test_invoke_returns_inference_error_when_agent_message_missing(monkeypatch):
     assert "error" in result
     assert result["error"]["code"] == "INFERENCE_ERROR"
     assert "Agent returned an invalid response payload." in result["error"]["details"]
+
+
+def test_invoke_returns_orchestrator_trace_when_include_trace_enabled(monkeypatch):
+    outputs = iter(
+        [
+            # BriefNormalizer output
+            SimpleNamespace(
+                message=(
+                    '{"task_type":"campaign planning","objective":"trial signup","audience":"SMB founders",'
+                    '"channel_plan":["email"],"constraints":["brand","legal","format"],'
+                    '"missing_info":[],"assumptions":["assume baseline"],"success_metrics":["CTR","CVR","CPL"],'
+                    '"experiment_hypotheses":[{"name":"Hook test","variant_a":"A","variant_b":"B","expected_impact":"CTR lift"}]}'
+                )
+            ),
+            # Planner output
+            SimpleNamespace(
+                message=(
+                    '{"strategy":{"positioning_angle":"Outcome-first","message_pillars":["p1","p2","p3"],'
+                    '"funnel_stage":"mid_funnel","offer_strategy":"free_trial"},'
+                    '"channel_execution":[{"channel":"email","asset_types":["copy"],"distribution_notes":"notes","primary_kpi":"CTR"}],'
+                    '"experiment_matrix":[{"name":"Hook test","variant_a":"A","variant_b":"B","expected_impact":"CTR lift"}],'
+                    '"risks_and_mitigations":[{"risk":"claim risk","mitigation":"use evidence"}]}'
+                )
+            ),
+            # Generator output
+            SimpleNamespace(message="Generated campaign copy"),
+            # Evaluator output
+            SimpleNamespace(
+                message=(
+                    '{"scores":{"brand_consistency":88,"clarity":90,"conversion_potential":84,"compliance_risk":20},'
+                    '"overall_verdict":"pass","reasons":[{"dimension":"clarity","score":90,"reason":"clear","evidence":"structured"}],'
+                    '"required_revisions":[],"approved_claims":["claim a"],"flagged_claims":[]}'
+                )
+            ),
+        ]
+    )
+
+    def fake_agent(_prompt: str):
+        return next(outputs)
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: fake_agent)
+
+    result = main.invoke(
+        {
+            "prompt": "Generate launch copy",
+            "tool_args": {
+                "channel": "email",
+                "product": "Acme AI",
+                "audience": "SMB founders",
+                "objective": "trial signup",
+                "include_trace": True,
+            },
+        }
+    )
+
+    assert result["result"] == "Generated campaign copy"
+    assert "orchestrator" in result
+    assert result["orchestrator"]["brief"]["task_type"] == "campaign planning"
+    assert result["orchestrator"]["plan"]["strategy"]["positioning_angle"] == "Outcome-first"
+    assert result["orchestrator"]["evaluation"]["overall_verdict"] == "pass"

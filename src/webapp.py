@@ -7,6 +7,7 @@ import re
 import secrets
 import sqlite3
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,11 @@ SESSION_COOKIE = "nova_session"
 SESSION_DAYS = 7
 MAX_DOC_SIZE_BYTES = 3 * 1024 * 1024
 MAX_DOC_PREVIEW_CHARS = 6000
+MAX_MEMORY_TURNS = 8
+MEMORY_SUMMARY_MAX_CHARS = 1400
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 10 * 60
+LOGIN_RATE_LIMIT_MAX_FAILURES = 8
+COOKIE_SECURE = os.getenv("NOVARED_COOKIE_SECURE", "0").strip() in {"1", "true", "True"}
 
 SUPPORTED_MODELS = [
     "us.amazon.nova-micro-v1:0",
@@ -68,6 +74,11 @@ SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".log", ".py", ".ht
 
 DEFAULT_ADMIN_USER = os.getenv("NOVARED_ADMIN_USER", "admin")
 DEFAULT_ADMIN_PASSWORD = os.getenv("NOVARED_ADMIN_PASSWORD", "admin123456")
+ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE = os.getenv("NOVARED_ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE", "0").strip() in {
+    "1",
+    "true",
+    "True",
+}
 
 
 def now_utc() -> datetime:
@@ -104,6 +115,7 @@ def init_db() -> None:
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                must_change_password INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -111,6 +123,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 token TEXT UNIQUE NOT NULL,
+                csrf_token TEXT,
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -146,6 +159,17 @@ def init_db() -> None:
                 file_path TEXT NOT NULL,
                 text_content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id),
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             );
 
@@ -192,6 +216,60 @@ def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(requested_by) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_memories (
+                conversation_id INTEGER PRIMARY KEY,
+                summary TEXT NOT NULL,
+                source_message_id INTEGER,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS orchestrator_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                request_message_id INTEGER,
+                response_message_id INTEGER,
+                model_id TEXT NOT NULL,
+                brief_json TEXT,
+                plan_json TEXT,
+                evaluation_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                ip_address TEXT,
+                success INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS experiments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_user_id INTEGER NOT NULL,
+                conversation_id INTEGER,
+                title TEXT NOT NULL,
+                hypothesis TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id),
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS experiment_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment_id INTEGER NOT NULL,
+                variant_key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(experiment_id) REFERENCES experiments(id),
+                UNIQUE(experiment_id, variant_key)
+            );
             """
         )
 
@@ -213,6 +291,18 @@ def init_db() -> None:
         if "share_group_id" not in conversation_cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN share_group_id INTEGER")
 
+        user_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "must_change_password" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+
+        session_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "csrf_token" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
+
         kb_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(brand_kb_versions)").fetchall()
         }
@@ -224,17 +314,39 @@ def init_db() -> None:
         if "share_group_id" not in kb_cols:
             conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN share_group_id INTEGER")
 
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_conversation_id ON documents(conversation_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_document_chunks_conversation_id ON document_chunks(conversation_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time ON login_attempts(username, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time ON login_attempts(ip_address, created_at)")
+
         admin_exists = conn.execute(
-            "SELECT id FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)
+            "SELECT id, password_salt, password_hash FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)
         ).fetchone()
         if not admin_exists:
             salt, pwd_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
             conn.execute(
                 """
-                INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, created_at)
-                VALUES (?, ?, ?, 1, 1, ?)
+                INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, must_change_password, created_at)
+                VALUES (?, ?, ?, 1, 1, ?, ?)
                 """,
-                (DEFAULT_ADMIN_USER, salt, pwd_hash, now_utc().isoformat()),
+                (
+                    DEFAULT_ADMIN_USER,
+                    salt,
+                    pwd_hash,
+                    1 if (ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE and DEFAULT_ADMIN_PASSWORD == "admin123456") else 0,
+                    now_utc().isoformat(),
+                ),
+            )
+        elif verify_password(DEFAULT_ADMIN_PASSWORD, admin_exists["password_salt"], admin_exists["password_hash"]):
+            conn.execute(
+                "UPDATE users SET must_change_password = ? WHERE id = ?",
+                (1 if ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE else 0, admin_exists["id"]),
+            )
+        elif not ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE:
+            conn.execute(
+                "UPDATE users SET must_change_password = 0 WHERE id = ?",
+                (admin_exists["id"],),
             )
 
 
@@ -244,6 +356,31 @@ app = FastAPI(title="Marketing Copilot Web Chat")
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+
+
+def _is_csrf_exempt(request: Request) -> bool:
+    if not request.url.path.startswith("/api/"):
+        return True
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    path = request.url.path
+    if path in {"/api/public/groups"}:
+        return True
+    return False
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+    if _is_csrf_exempt(request):
+        return await call_next(request)
+    session_row = _request_session_row(request)
+    if not session_row:
+        return await call_next(request)
+    expected = (session_row["csrf_token"] or "").strip()
+    provided = (request.headers.get("X-CSRF-Token") or "").strip()
+    if not expected or provided != expected:
+        return JSONResponse({"detail": "Invalid CSRF token"}, status_code=403)
+    return await call_next(request)
 
 
 def parse_time(value: str) -> datetime:
@@ -293,15 +430,86 @@ def must_admin(request: Request) -> sqlite3.Row:
     return user
 
 
-def create_session(user_id: int) -> tuple[str, datetime]:
+def create_session(user_id: int) -> tuple[str, datetime, str]:
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(24)
     expires_at = now_utc() + timedelta(days=SESSION_DAYS)
     with db_conn() as conn:
         conn.execute(
-            "INSERT INTO sessions (user_id, token, expires_at, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, token, expires_at.isoformat(), now_utc().isoformat()),
+            "INSERT INTO sessions (user_id, token, csrf_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, token, csrf_token, expires_at.isoformat(), now_utc().isoformat()),
         )
-    return token, expires_at
+    return token, expires_at, csrf_token
+
+
+def _request_session_row(request: Request) -> sqlite3.Row | None:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, user_id, token, csrf_token, expires_at FROM sessions WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if row and not row["csrf_token"]:
+            refreshed = secrets.token_urlsafe(24)
+            conn.execute("UPDATE sessions SET csrf_token = ? WHERE id = ?", (refreshed, row["id"]))
+            row = conn.execute(
+                "SELECT id, user_id, token, csrf_token, expires_at FROM sessions WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+        return row
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
+
+
+def _record_login_attempt(username: str, ip_address: str, success: bool) -> None:
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO login_attempts (username, ip_address, success, created_at) VALUES (?, ?, ?, ?)",
+            (username, ip_address, 1 if success else 0, now),
+        )
+        cutoff = (now_utc() - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS * 5)).isoformat()
+        conn.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff,))
+
+
+def _is_login_rate_limited(username: str, ip_address: str) -> bool:
+    since = (now_utc() - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS)).isoformat()
+    with db_conn() as conn:
+        user_failures = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM login_attempts
+            WHERE username = ? AND success = 0 AND created_at >= ?
+            """,
+            (username, since),
+        ).fetchone()["cnt"]
+        ip_failures = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt FROM login_attempts
+            WHERE ip_address = ? AND success = 0 AND created_at >= ?
+            """,
+            (ip_address, since),
+        ).fetchone()["cnt"]
+    return user_failures >= LOGIN_RATE_LIMIT_MAX_FAILURES or ip_failures >= LOGIN_RATE_LIMIT_MAX_FAILURES
+
+
+def _validate_csrf_header(request: Request) -> None:
+    session_row = _request_session_row(request)
+    if not session_row:
+        return
+    expected = (session_row["csrf_token"] or "").strip()
+    provided = (request.headers.get("X-CSRF-Token") or "").strip()
+    if not expected or expected != provided:
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
 
 def _normalize_visibility(raw: str | None) -> str:
@@ -420,22 +628,170 @@ def _extract_text_from_upload(filename: str, raw: bytes) -> str:
     return text[:MAX_DOC_PREVIEW_CHARS]
 
 
-def _build_document_context(conversation_id: int) -> str:
+def _split_text_chunks(text: str, *, chunk_size: int = 700, overlap: int = 120) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return []
+    if len(cleaned) <= chunk_size:
+        return [cleaned]
+    chunks: list[str] = []
+    step = max(100, chunk_size - overlap)
+    cursor = 0
+    while cursor < len(cleaned):
+        piece = cleaned[cursor : cursor + chunk_size].strip()
+        if piece:
+            chunks.append(piece)
+        if cursor + chunk_size >= len(cleaned):
+            break
+        cursor += step
+    return chunks
+
+
+def _tokenize_for_retrieval(text: str) -> list[str]:
+    lowered = (text or "").lower()
+    return [x for x in re.findall(r"[a-z0-9\u4e00-\u9fff_]+", lowered) if len(x) >= 2]
+
+
+def _index_document_chunks(document_id: int, conversation_id: int, text_content: str) -> None:
+    chunks = _split_text_chunks(text_content)
+    now = now_utc().isoformat()
     with db_conn() as conn:
-        docs = conn.execute(
+        conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        conn.executemany(
             """
-            SELECT filename, text_content
-            FROM documents
+            INSERT INTO document_chunks (document_id, conversation_id, chunk_index, chunk_text, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [(document_id, conversation_id, idx, chunk, now) for idx, chunk in enumerate(chunks)],
+        )
+
+
+def _build_recent_messages_context(conversation_id: int, *, max_turns: int = MAX_MEMORY_TURNS) -> str:
+    limit_rows = max(2, max_turns * 2)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM messages
             WHERE conversation_id = ?
-            ORDER BY id ASC
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit_rows),
+        ).fetchall()
+    if not rows:
+        return ""
+    ordered = list(reversed(rows))
+    parts = ["Recent conversation context:"]
+    for row in ordered:
+        role_label = "User" if row["role"] == "user" else "Assistant"
+        parts.append(f"- {role_label}: {row['content'][:500]}")
+    return "\n".join(parts)
+
+
+def _refresh_conversation_summary(conversation_id: int) -> None:
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT 24
             """,
             (conversation_id,),
         ).fetchall()
-    if not docs:
-        return ""
-    parts = ["Attached documents context (use when relevant):"]
-    for doc in docs:
-        parts.append(f"\n[Document: {doc['filename']}]\n{doc['text_content']}")
+        if not rows:
+            conn.execute("DELETE FROM conversation_memories WHERE conversation_id = ?", (conversation_id,))
+            return
+        ordered = list(reversed(rows))
+        summary_lines = []
+        for row in ordered:
+            prefix = "U" if row["role"] == "user" else "A"
+            summary_lines.append(f"{prefix}: {row['content'][:180]}")
+        summary_text = "\n".join(summary_lines)[-MEMORY_SUMMARY_MAX_CHARS:]
+        source_message_id = ordered[-1]["id"]
+        now = now_utc().isoformat()
+        conn.execute(
+            """
+            INSERT INTO conversation_memories (conversation_id, summary, source_message_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                summary = excluded.summary,
+                source_message_id = excluded.source_message_id,
+                updated_at = excluded.updated_at
+            """,
+            (conversation_id, summary_text, source_message_id, now),
+        )
+
+
+def _build_conversation_memory_context(conversation_id: int) -> str:
+    recent_context = _build_recent_messages_context(conversation_id)
+    with db_conn() as conn:
+        memory_row = conn.execute(
+            "SELECT summary, updated_at FROM conversation_memories WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+    parts = []
+    if memory_row and memory_row["summary"]:
+        parts.append("Rolling summary memory:")
+        parts.append(memory_row["summary"])
+    if recent_context:
+        parts.append(recent_context)
+    return "\n\n".join(parts)
+
+
+def _build_document_context(conversation_id: int, *, query_text: str = "", top_k: int = 6) -> str:
+    with db_conn() as conn:
+        chunks = conn.execute(
+            """
+            SELECT c.id, c.chunk_text, c.chunk_index, d.filename
+            FROM document_chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchall()
+    if not chunks:
+        with db_conn() as conn:
+            docs = conn.execute(
+                "SELECT id, text_content FROM documents WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchall()
+        if not docs:
+            return ""
+        for doc in docs:
+            _index_document_chunks(doc["id"], conversation_id, doc["text_content"])
+        with db_conn() as conn:
+            chunks = conn.execute(
+                """
+                SELECT c.id, c.chunk_text, c.chunk_index, d.filename
+                FROM document_chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchall()
+        if not chunks:
+            return ""
+    query_tokens = _tokenize_for_retrieval(query_text)
+    query_counts = Counter(query_tokens)
+    scored: list[tuple[int, sqlite3.Row]] = []
+    for chunk in chunks:
+        if not query_counts:
+            score = 1
+        else:
+            chunk_counts = Counter(_tokenize_for_retrieval(chunk["chunk_text"]))
+            score = sum(min(query_counts[token], chunk_counts.get(token, 0)) for token in query_counts)
+        if score > 0:
+            scored.append((score, chunk))
+    scored.sort(key=lambda item: (item[0], -item[1]["chunk_index"]), reverse=True)
+    selected = [chunk for _, chunk in scored[:top_k]]
+    if not selected:
+        selected = [chunk for chunk in chunks[: min(top_k, len(chunks))]]
+    parts = ["Retrieved document context (top relevant chunks):"]
+    for chunk in selected:
+        parts.append(f"\n[Document: {chunk['filename']} | chunk {chunk['chunk_index']}]\n{chunk['chunk_text']}")
     return "\n".join(parts)
 
 
@@ -749,6 +1105,11 @@ class AdminResetPasswordInput(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class AccountPasswordInput(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class BrandKBInput(BaseModel):
     kb_key: str = Field(min_length=1, max_length=80)
     kb_name: str | None = Field(default=None, max_length=120)
@@ -797,6 +1158,23 @@ class GroupInviteInput(BaseModel):
 
 class GroupTransferAdminInput(BaseModel):
     new_admin_user_id: int
+
+
+class ExperimentCreateInput(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    hypothesis: str = Field(min_length=1, max_length=2000)
+    conversation_id: int | None = None
+    traffic_allocation: Any = Field(default_factory=dict)
+
+
+class ExperimentVariantInput(BaseModel):
+    variant_key: str = Field(min_length=1, max_length=40)
+    content: str = Field(min_length=1, max_length=10000)
+
+
+class ExperimentStatusInput(BaseModel):
+    status: str = Field(min_length=1, max_length=40)
+    result: Any = Field(default_factory=dict)
 
 
 class BrandKBUpdateInput(BaseModel):
@@ -946,6 +1324,7 @@ const I18N = {
 };
 
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let csrfToken = '';
 let publicGroups = [];
 
 function t(key) {
@@ -1426,6 +1805,7 @@ APP_HTML = """
         </div>
         <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
         <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
+        <button class="btn" onclick="changePassword()" data-i18n="change_password">修改密码</button>
         <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
         <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -1558,6 +1938,11 @@ const I18N = {
     kb_create: '新建KB版本',
     kb_mgmt: 'KB 管理',
     group_mgmt: '组管理',
+    change_password: '修改密码',
+    force_change_password: '为了安全，请先修改默认密码。',
+    old_password_prompt: '请输入当前密码',
+    new_password_prompt: '请输入新密码（至少8位）',
+    password_changed: '密码已更新，请重新登录',
     export_chat: '导出聊天',
     rename_chat: '重命名',
     brief_channel: '渠道',
@@ -1629,6 +2014,11 @@ const I18N = {
     kb_create: 'New KB Version',
     kb_mgmt: 'KB Management',
     group_mgmt: 'Group Management',
+    change_password: 'Change Password',
+    force_change_password: 'For security, please change your default password first.',
+    old_password_prompt: 'Enter current password',
+    new_password_prompt: 'Enter new password (at least 8 characters)',
+    password_changed: 'Password updated. Please sign in again.',
     export_chat: 'Export Chat',
     rename_chat: 'Rename',
     brief_channel: 'Channel',
@@ -1698,6 +2088,7 @@ let activeDocuments = [];
 let suppressKBChange = false;
 let editingConversationId = null;
 let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let csrfToken = '';
 
 function currentConversation() {
   return conversations.find((x) => x.id === activeConversationId) || null;
@@ -1752,12 +2143,23 @@ function syncTaskModeUI() {
 }
 
 async function api(url, options={}) {
+  const method = (options.method || 'GET').toUpperCase();
   const headers = options.body instanceof FormData ? {} : {'Content-Type':'application/json'};
+  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
   const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch (_) {}
   if (!res.ok) throw new Error(data.detail || t('request_failed'));
   return data;
+}
+
+async function loadCsrfToken() {
+  const res = await fetch('/api/csrf');
+  if (!res.ok) throw new Error('csrf');
+  const data = await res.json();
+  csrfToken = data.csrf_token || '';
 }
 
 function fmt(ts) {
@@ -2258,6 +2660,10 @@ async function loadMe() {
   me = await api('/api/me');
   document.getElementById('user-badge').textContent = `${t('current_user')}: ${me.username}`;
   if (me.is_admin) document.getElementById('admin-btn').style.display = 'inline-block';
+  if (me.must_change_password) {
+    alert(t('force_change_password'));
+    await changePassword(true);
+  }
 }
 
 async function loadConversations() {
@@ -2437,6 +2843,35 @@ async function logout() {
   location.href = '/';
 }
 
+async function changePassword(force=false) {
+  const currentPassword = prompt(t('old_password_prompt'));
+  if (!currentPassword) {
+    if (force) {
+      await logout();
+      return;
+    }
+    return;
+  }
+  const newPassword = prompt(t('new_password_prompt'));
+  if (!newPassword) return;
+  try {
+    await api('/api/account/password', {
+      method:'POST',
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+    alert(t('password_changed'));
+    await logout();
+  } catch (e) {
+    alert(`${t('request_failed')}: ${e.message}`);
+    if (force) {
+      await changePassword(true);
+    }
+  }
+}
+
 async function exportConversation() {
   if (!activeConversationId) {
     alert(t('no_chat_selected'));
@@ -2471,6 +2906,7 @@ function gotoGroups() { location.href = '/groups'; }
 (async function init(){
   try {
     applyI18n();
+    await loadCsrfToken();
     await loadMe();
     await loadModels();
     await loadMyGroups();
@@ -2776,6 +3212,7 @@ let kbList = [];
 let kbVersions = [];
 let myGroups = [];
 let me = null;
+let csrfToken = '';
 
 function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
 function setMsg(text, isWarn=false) {
@@ -2800,11 +3237,22 @@ function setLang(lang) {
   applyI18n();
 }
 async function api(url, options={}) {
-  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = {'Content-Type':'application/json'};
+  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
   if (!res.ok) throw new Error(data.detail || 'Request failed');
   return data;
+}
+async function loadCsrfToken() {
+  const res = await fetch('/api/csrf');
+  if (!res.ok) throw new Error('csrf');
+  const data = await res.json();
+  csrfToken = data.csrf_token || '';
 }
 function parseJSON(raw, fallback) {
   const text = (raw || '').trim();
@@ -3026,6 +3474,7 @@ function backToApp() { location.href = '/app'; }
 (async function init() {
   applyI18n();
   try {
+    await loadCsrfToken();
     me = await api('/api/me');
     await loadMyGroups();
     await refreshKBList();
@@ -3197,6 +3646,7 @@ let currentLang = localStorage.getItem('nova_lang') || 'zh';
 let me = null;
 let myGroups = [];
 let allGroups = [];
+let csrfToken = '';
 
 function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
 function setLang(lang) {
@@ -3214,11 +3664,22 @@ function applyI18n() {
   document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
 }
 async function api(url, options={}) {
-  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = {'Content-Type':'application/json'};
+  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
   if (!res.ok) throw new Error(data.detail || 'Request failed');
   return data;
+}
+async function loadCsrfToken() {
+  const res = await fetch('/api/csrf');
+  if (!res.ok) throw new Error('csrf');
+  const data = await res.json();
+  csrfToken = data.csrf_token || '';
 }
 function roleLabel(role) { return role === 'admin' ? t('admin') : t('member'); }
 function statusLabel(status) {
@@ -3415,6 +3876,7 @@ function backToApp() { location.href = '/app'; }
 (async function init() {
   applyI18n();
   try {
+    await loadCsrfToken();
     await refreshData();
   } catch {
     location.href = '/';
@@ -3663,11 +4125,22 @@ function setLang(lang) {
 }
 
 async function api(url, options={}) {
-  const res = await fetch(url, {headers:{'Content-Type':'application/json'}, ...options});
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = {'Content-Type':'application/json'};
+  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
   if (!res.ok) throw new Error(data.detail || t('request_failed'));
   return data;
+}
+async function loadCsrfToken() {
+  const res = await fetch('/api/csrf');
+  if (!res.ok) throw new Error('csrf');
+  const data = await res.json();
+  csrfToken = data.csrf_token || '';
 }
 
 function fmt(ts) {
@@ -3724,8 +4197,15 @@ async function resetPwd(userId) {
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function back() { location.href = '/app'; }
 
-applyI18n();
-loadUsers().catch(() => location.href = '/app');
+(async function init() {
+  applyI18n();
+  try {
+    await loadCsrfToken();
+    await loadUsers();
+  } catch {
+    location.href = '/app';
+  }
+})();
 </script>
 </body>
 </html>
@@ -3778,47 +4258,59 @@ def register(body: RegisterInput) -> Any:
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="用户名已存在")
 
-    token, exp = create_session(user_id)
+    token, exp, csrf_token = create_session(user_id)
     response = JSONResponse({"ok": True, "group_requests_created": len(requested_group_ids)})
     response.set_cookie(
         SESSION_COOKIE,
         token,
         httponly=True,
         samesite="lax",
+        secure=COOKIE_SECURE,
         expires=exp.strftime("%a, %d %b %Y %H:%M:%S GMT"),
     )
+    response.headers["X-CSRF-Token"] = csrf_token
     return response
 
 
 @app.post("/login")
-def login(body: LoginInput) -> Any:
+def login(body: LoginInput, request: Request) -> Any:
+    username = body.username.strip()
+    ip_address = _client_ip(request)
+    if _is_login_rate_limited(username, ip_address):
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Please retry later.")
     with db_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE username = ?", (body.username.strip(),)).fetchone()
+        user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not user or not verify_password(body.password, user["password_salt"], user["password_hash"]):
+        _record_login_attempt(username, ip_address, False)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     if user["is_active"] == 0:
+        _record_login_attempt(username, ip_address, False)
         raise HTTPException(status_code=403, detail="账号已被禁用")
+    _record_login_attempt(username, ip_address, True)
 
-    token, exp = create_session(user["id"])
-    response = JSONResponse({"ok": True})
+    token, exp, csrf_token = create_session(user["id"])
+    response = JSONResponse({"ok": True, "must_change_password": bool(user["must_change_password"])})
     response.set_cookie(
         SESSION_COOKIE,
         token,
         httponly=True,
         samesite="lax",
+        secure=COOKIE_SECURE,
         expires=exp.strftime("%a, %d %b %Y %H:%M:%S GMT"),
     )
+    response.headers["X-CSRF-Token"] = csrf_token
     return response
 
 
 @app.post("/logout")
 def logout(request: Request) -> Any:
+    _validate_csrf_header(request)
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         with db_conn() as conn:
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
     response = JSONResponse({"ok": True})
-    response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(SESSION_COOKIE, samesite="lax", secure=COOKIE_SECURE)
     return response
 
 
@@ -3860,7 +4352,35 @@ def api_me(request: Request) -> Any:
         "id": user["id"],
         "username": user["username"],
         "is_admin": bool(user["is_admin"]),
+        "must_change_password": bool(user["must_change_password"]),
     }
+
+
+@app.get("/api/csrf")
+def get_csrf_token(request: Request) -> Any:
+    must_login(request)
+    session_row = _request_session_row(request)
+    if not session_row:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"csrf_token": session_row["csrf_token"] or ""}
+
+
+@app.post("/api/account/password")
+def update_my_password(body: AccountPasswordInput, request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        row = conn.execute("SELECT id, password_salt, password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not verify_password(body.current_password, row["password_salt"], row["password_hash"]):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        new_salt, new_hash = hash_password(body.new_password)
+        conn.execute(
+            "UPDATE users SET password_salt = ?, password_hash = ?, must_change_password = 0 WHERE id = ?",
+            (new_salt, new_hash, user["id"]),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = ? AND token != ?", (user["id"], request.cookies.get(SESSION_COOKIE, "")))
+    return {"ok": True}
 
 
 @app.get("/api/public/groups")
@@ -4198,6 +4718,142 @@ def transfer_group_admin(group_id: int, body: GroupTransferAdminInput, request: 
             (group_id, new_admin_id),
         )
     return {"ok": True, "new_admin_user_id": new_admin_id}
+
+
+@app.get("/api/experiments")
+def list_experiments(request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
+                   traffic_allocation_json, result_json, created_at, updated_at
+            FROM experiments
+            WHERE owner_user_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+    data = []
+    for row in rows:
+        item = dict(row)
+        item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
+        item["result"] = _json_loads(item.pop("result_json"), {})
+        data.append(item)
+    return data
+
+
+@app.post("/api/experiments")
+def create_experiment(body: ExperimentCreateInput, request: Request) -> Any:
+    user = must_login(request)
+    now = now_utc().isoformat()
+    conversation_id = body.conversation_id
+    if conversation_id is not None:
+        conversation_owner_or_404(user["id"], conversation_id)
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO experiments (
+                owner_user_id, conversation_id, title, hypothesis, status,
+                traffic_allocation_json, result_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'draft', ?, '{}', ?, ?)
+            """,
+            (
+                user["id"],
+                conversation_id,
+                body.title.strip()[:160],
+                body.hypothesis.strip()[:2000],
+                _json_dumps(body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}),
+                now,
+                now,
+            ),
+        )
+        experiment_id = cur.lastrowid
+    return {"ok": True, "id": experiment_id}
+
+
+@app.get("/api/experiments/{experiment_id}")
+def get_experiment(experiment_id: int, request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        exp = conn.execute(
+            """
+            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
+                   traffic_allocation_json, result_json, created_at, updated_at
+            FROM experiments
+            WHERE id = ? AND owner_user_id = ?
+            """,
+            (experiment_id, user["id"]),
+        ).fetchone()
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        variants = conn.execute(
+            """
+            SELECT id, variant_key, content, created_at
+            FROM experiment_variants
+            WHERE experiment_id = ?
+            ORDER BY id ASC
+            """,
+            (experiment_id,),
+        ).fetchall()
+    item = dict(exp)
+    item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
+    item["result"] = _json_loads(item.pop("result_json"), {})
+    item["variants"] = [dict(v) for v in variants]
+    return item
+
+
+@app.post("/api/experiments/{experiment_id}/variants")
+def upsert_experiment_variant(experiment_id: int, body: ExperimentVariantInput, request: Request) -> Any:
+    user = must_login(request)
+    key = body.variant_key.strip().lower()
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        exp = conn.execute(
+            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
+            (experiment_id, user["id"]),
+        ).fetchone()
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        conn.execute(
+            """
+            INSERT INTO experiment_variants (experiment_id, variant_key, content, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(experiment_id, variant_key) DO UPDATE SET content = excluded.content
+            """,
+            (experiment_id, key[:40], body.content.strip()[:10000], now),
+        )
+        conn.execute(
+            "UPDATE experiments SET updated_at = ? WHERE id = ?",
+            (now, experiment_id),
+        )
+    return {"ok": True}
+
+
+@app.patch("/api/experiments/{experiment_id}/status")
+def update_experiment_status(experiment_id: int, body: ExperimentStatusInput, request: Request) -> Any:
+    user = must_login(request)
+    status = body.status.strip().lower()
+    if status not in {"draft", "running", "paused", "completed", "archived"}:
+        raise HTTPException(status_code=400, detail="Unsupported experiment status")
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        exp = conn.execute(
+            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
+            (experiment_id, user["id"]),
+        ).fetchone()
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        conn.execute(
+            """
+            UPDATE experiments
+            SET status = ?, result_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, _json_dumps(body.result if isinstance(body.result, dict) else {}), now, experiment_id),
+        )
+    return {"ok": True}
 
 
 @app.get("/api/kb/list")
@@ -4554,6 +5210,9 @@ def delete_conversation(conversation_id: int, request: Request) -> Any:
             path = Path(doc["file_path"])
             if path.exists():
                 path.unlink()
+        conn.execute("DELETE FROM document_chunks WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversation_memories WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM orchestrator_runs WHERE conversation_id = ?", (conversation_id,))
         conn.execute("DELETE FROM documents WHERE conversation_id = ?", (conversation_id,))
         conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -4713,6 +5372,32 @@ def list_messages(conversation_id: int, request: Request) -> Any:
     return [dict(r) for r in rows]
 
 
+@app.get("/api/conversations/{conversation_id}/orchestrator-runs")
+def list_orchestrator_runs(conversation_id: int, request: Request) -> Any:
+    user = must_login(request)
+    conversation_visible_or_404(user["id"], conversation_id)
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, request_message_id, response_message_id, model_id,
+                   brief_json, plan_json, evaluation_json, created_at
+            FROM orchestrator_runs
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT 30
+            """,
+            (conversation_id,),
+        ).fetchall()
+    data = []
+    for row in rows:
+        item = dict(row)
+        item["brief"] = _json_loads(item.pop("brief_json"), {})
+        item["plan"] = _json_loads(item.pop("plan_json"), {})
+        item["evaluation"] = _json_loads(item.pop("evaluation_json"), {})
+        data.append(item)
+    return data
+
+
 @app.get("/api/conversations/{conversation_id}/export")
 def export_conversation(conversation_id: int, request: Request) -> Any:
     user = must_login(request)
@@ -4815,6 +5500,7 @@ async def upload_document(conversation_id: int, request: Request, file: UploadFi
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
             (now, conversation_id),
         )
+    _index_document_chunks(doc_id, conversation_id, text_content)
     return {
         "id": doc_id,
         "filename": Path(file.filename).name,
@@ -4834,6 +5520,7 @@ def delete_document(conversation_id: int, document_id: int, request: Request) ->
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Document not found")
+        conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
         conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         path = Path(row["file_path"])
         if path.exists():
@@ -4852,10 +5539,11 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
 
     now = now_utc().isoformat()
     with db_conn() as conn:
-        conn.execute(
+        user_cur = conn.execute(
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
             (conversation_id, content, now),
         )
+        user_message_id = user_cur.lastrowid
 
     context = {
         "channel": body.channel,
@@ -4865,14 +5553,18 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "brand_voice": body.brand_voice,
         "ui_language": body.ui_language,
         "model_id": conversation["model_id"],
+        "include_trace": True,
     }
     extra_parts = []
     if body.extra_requirements:
         extra_parts.append(body.extra_requirements)
+    memory_context = _build_conversation_memory_context(conversation_id)
+    if memory_context:
+        extra_parts.append(memory_context)
     kb_context = _build_brand_kb_context(conversation["kb_key"], conversation["kb_version"])
     if kb_context:
         extra_parts.append(kb_context)
-    doc_context = _build_document_context(conversation_id)
+    doc_context = _build_document_context(conversation_id, query_text=content)
     if doc_context:
         extra_parts.append(doc_context)
     context["extra_requirements"] = "\n\n".join(extra_parts) if extra_parts else None
@@ -4907,10 +5599,33 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
 
     now2 = now_utc().isoformat()
     with db_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
             (conversation_id, assistant_text, now2),
         )
+        assistant_message_id = cur.lastrowid
+
+        orchestrator = agent_output.get("orchestrator") if isinstance(agent_output, dict) else None
+        if isinstance(orchestrator, dict):
+            conn.execute(
+                """
+                INSERT INTO orchestrator_runs (
+                    conversation_id, request_message_id, response_message_id, model_id,
+                    brief_json, plan_json, evaluation_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    user_message_id,
+                    assistant_message_id,
+                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    _json_dumps(orchestrator.get("brief")),
+                    _json_dumps(orchestrator.get("plan")),
+                    _json_dumps(orchestrator.get("evaluation")),
+                    now2,
+                ),
+            )
 
         if conversation["title"] in {"新对话", "新营销任务"}:
             new_title = content[:30]
@@ -4932,6 +5647,8 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
                     conversation_id,
                 ),
             )
+
+    _refresh_conversation_summary(conversation_id)
 
     return {
         "assistant_message": {

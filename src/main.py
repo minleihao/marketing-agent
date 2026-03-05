@@ -1,11 +1,23 @@
+import json
 import os
+import re
 from typing import Any, Dict
 
 from dotenv import load_dotenv
 from strands import Agent
 
 from model.load import DEFAULT_MODEL_ID, load_model
-from prompts import SYSTEM_PROMPT, chat_prompt, language_instruction, marketing_prompt
+from prompts import (
+    SYSTEM_PROMPT,
+    ORCHESTRATOR_JSON_TEMPLATE,
+    brief_normalizer_prompt,
+    chat_prompt,
+    evaluator_prompt,
+    generator_prompt,
+    language_instruction,
+    marketing_prompt,
+    planner_prompt,
+)
 
 try:
     from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -32,6 +44,7 @@ VALID_CHANNELS = {
     "landing_page",
     "other",
 }
+ORCHESTRATOR_ENABLED = os.getenv("NOVARED_ORCHESTRATOR_ENABLED", "1").strip() not in {"0", "false", "False"}
 
 _agent_cache: dict[str, Agent] = {}
 
@@ -183,6 +196,303 @@ def _extract_message_text(result: Any) -> str:
     return ""
 
 
+def _extract_json_candidate(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "{}"
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        return raw
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return raw[start : end + 1]
+    return "{}"
+
+
+def _safe_json_loads(text: str, default: Any) -> Any:
+    try:
+        return json.loads(_extract_json_candidate(text))
+    except Exception:
+        return default
+
+
+def _ensure_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _normalize_experiment_hypothesis(item: Any) -> dict[str, str]:
+    if not isinstance(item, dict):
+        return {
+            "name": "Hypothesis",
+            "variant_a": "Control",
+            "variant_b": "Variant",
+            "expected_impact": "Increase conversion rate",
+        }
+    return {
+        "name": str(item.get("name", "Hypothesis")).strip() or "Hypothesis",
+        "variant_a": str(item.get("variant_a", "Control")).strip() or "Control",
+        "variant_b": str(item.get("variant_b", "Variant")).strip() or "Variant",
+        "expected_impact": str(item.get("expected_impact", "Increase conversion rate")).strip()
+        or "Increase conversion rate",
+    }
+
+
+def _normalize_brief_json(candidate: Any, *, fallback: dict[str, Any]) -> dict[str, Any]:
+    base = dict(ORCHESTRATOR_JSON_TEMPLATE)
+    if isinstance(candidate, dict):
+        base.update(candidate)
+    base["task_type"] = str(base.get("task_type") or fallback.get("task_type") or "marketing_content_generation").strip()
+    base["objective"] = str(base.get("objective") or fallback.get("objective") or "Increase qualified conversions").strip()
+    base["audience"] = str(base.get("audience") or fallback.get("audience") or "Broad target audience").strip()
+    channel_plan = _ensure_str_list(base.get("channel_plan"))
+    if not channel_plan:
+        fallback_channel = fallback.get("channel")
+        channel_plan = [fallback_channel] if fallback_channel else ["general"]
+    base["channel_plan"] = channel_plan
+    constraints = _ensure_str_list(base.get("constraints"))
+    if not constraints:
+        constraints = ["brand", "legal", "format"]
+    base["constraints"] = constraints
+    base["missing_info"] = _ensure_str_list(base.get("missing_info"))
+    assumptions = _ensure_str_list(base.get("assumptions"))
+    if not assumptions:
+        assumptions = _ensure_str_list(fallback.get("assumptions")) or ["Use minimum viable assumptions and proceed"]
+    base["assumptions"] = assumptions
+    success_metrics = _ensure_str_list(base.get("success_metrics"))
+    if not success_metrics:
+        success_metrics = ["CTR", "CVR", "CPL"]
+    base["success_metrics"] = success_metrics
+    raw_hypotheses = base.get("experiment_hypotheses")
+    if not isinstance(raw_hypotheses, list):
+        raw_hypotheses = []
+    base["experiment_hypotheses"] = [_normalize_experiment_hypothesis(item) for item in raw_hypotheses]
+    if not base["experiment_hypotheses"]:
+        base["experiment_hypotheses"] = [
+            {
+                "name": "Value prop clarity test",
+                "variant_a": "Feature-first hook",
+                "variant_b": "Outcome-first hook",
+                "expected_impact": "Improve CTR",
+            }
+        ]
+    return base
+
+
+def _normalize_planner_json(candidate: Any, *, brief: dict[str, Any]) -> dict[str, Any]:
+    default_plan = {
+        "strategy": {
+            "positioning_angle": f"Outcome-first positioning for {brief.get('audience', 'target audience')}",
+            "message_pillars": [
+                "Primary customer pain and urgency",
+                "Credible proof and differentiation",
+                "Clear next action and low-friction CTA",
+            ],
+            "funnel_stage": "mid_funnel",
+            "offer_strategy": "Value-first offer framing",
+        },
+        "channel_execution": [
+            {
+                "channel": channel,
+                "asset_types": ["primary_copy", "headline", "cta"],
+                "distribution_notes": "Use audience-fit targeting and frequency control",
+                "primary_kpi": (brief.get("success_metrics") or ["CTR"])[0],
+            }
+            for channel in (brief.get("channel_plan") or ["general"])
+        ],
+        "experiment_matrix": brief.get("experiment_hypotheses") or [],
+        "risks_and_mitigations": [
+            {"risk": "Unverifiable claims", "mitigation": "Use defensible claims and concise proof points"}
+        ],
+    }
+    if not isinstance(candidate, dict):
+        return default_plan
+    plan = dict(default_plan)
+    plan.update(candidate)
+    if not isinstance(plan.get("strategy"), dict):
+        plan["strategy"] = default_plan["strategy"]
+    strategy = dict(default_plan["strategy"])
+    strategy.update(plan["strategy"])
+    strategy["message_pillars"] = _ensure_str_list(strategy.get("message_pillars")) or default_plan["strategy"]["message_pillars"]
+    plan["strategy"] = strategy
+
+    channel_execution = plan.get("channel_execution")
+    if not isinstance(channel_execution, list) or not channel_execution:
+        channel_execution = default_plan["channel_execution"]
+    normalized_channels: list[dict[str, Any]] = []
+    for item in channel_execution:
+        if not isinstance(item, dict):
+            continue
+        normalized_channels.append(
+            {
+                "channel": str(item.get("channel", "general")).strip() or "general",
+                "asset_types": _ensure_str_list(item.get("asset_types")) or ["primary_copy"],
+                "distribution_notes": str(item.get("distribution_notes", "")).strip()
+                or "Align message and targeting to audience intent",
+                "primary_kpi": str(item.get("primary_kpi", "CTR")).strip() or "CTR",
+            }
+        )
+    plan["channel_execution"] = normalized_channels or default_plan["channel_execution"]
+
+    experiments = plan.get("experiment_matrix")
+    if not isinstance(experiments, list):
+        experiments = []
+    plan["experiment_matrix"] = [_normalize_experiment_hypothesis(item) for item in experiments] or default_plan["experiment_matrix"]
+
+    risks = plan.get("risks_and_mitigations")
+    if not isinstance(risks, list) or not risks:
+        risks = default_plan["risks_and_mitigations"]
+    normalized_risks: list[dict[str, str]] = []
+    for item in risks:
+        if not isinstance(item, dict):
+            continue
+        normalized_risks.append(
+            {
+                "risk": str(item.get("risk", "Execution risk")).strip() or "Execution risk",
+                "mitigation": str(item.get("mitigation", "Define clear controls")).strip() or "Define clear controls",
+            }
+        )
+    plan["risks_and_mitigations"] = normalized_risks or default_plan["risks_and_mitigations"]
+    return plan
+
+
+def _normalize_evaluator_json(candidate: Any) -> dict[str, Any]:
+    default_eval = {
+        "scores": {
+            "brand_consistency": 70,
+            "clarity": 70,
+            "conversion_potential": 70,
+            "compliance_risk": 30,
+        },
+        "overall_verdict": "pass",
+        "reasons": [],
+        "required_revisions": [],
+        "approved_claims": [],
+        "flagged_claims": [],
+    }
+    if not isinstance(candidate, dict):
+        return default_eval
+    out = dict(default_eval)
+    out.update(candidate)
+    scores = out.get("scores")
+    if not isinstance(scores, dict):
+        scores = dict(default_eval["scores"])
+    normalized_scores: dict[str, int] = {}
+    for key, fallback in default_eval["scores"].items():
+        value = scores.get(key, fallback)
+        try:
+            numeric = int(value)
+        except Exception:
+            numeric = fallback
+        normalized_scores[key] = max(0, min(100, numeric))
+    out["scores"] = normalized_scores
+    verdict = str(out.get("overall_verdict", "pass")).strip().lower()
+    out["overall_verdict"] = verdict if verdict in {"pass", "needs_revision"} else "pass"
+    out["required_revisions"] = _ensure_str_list(out.get("required_revisions"))
+    out["approved_claims"] = _ensure_str_list(out.get("approved_claims"))
+    out["flagged_claims"] = _ensure_str_list(out.get("flagged_claims"))
+    reasons = out.get("reasons")
+    normalized_reasons: list[dict[str, Any]] = []
+    if isinstance(reasons, list):
+        for item in reasons:
+            if not isinstance(item, dict):
+                continue
+            normalized_reasons.append(
+                {
+                    "dimension": str(item.get("dimension", "general")).strip() or "general",
+                    "score": max(0, min(100, int(item.get("score", 70)))) if str(item.get("score", "")).isdigit() else 70,
+                    "reason": str(item.get("reason", "")).strip(),
+                    "evidence": str(item.get("evidence", "")).strip(),
+                }
+            )
+    out["reasons"] = normalized_reasons
+    return out
+
+
+def _run_marketing_orchestration(
+    *,
+    agent: Agent,
+    user_prompt: str,
+    channel: str,
+    product: str,
+    audience: str,
+    objective: str,
+    brand_voice: str,
+    extra: str,
+    language_rules: str,
+) -> dict[str, Any]:
+    brief_prompt = brief_normalizer_prompt(
+        user_prompt=user_prompt,
+        channel=channel,
+        product=product,
+        audience=audience,
+        objective=objective,
+        brand_voice=brand_voice,
+        extra=extra,
+    )
+    brief_text = _extract_message_text(agent(brief_prompt))
+    brief_fallback = {
+        "task_type": "marketing_content_generation",
+        "objective": objective or "Increase qualified conversions",
+        "audience": audience or "Broad target audience",
+        "channel": channel,
+        "assumptions": [f"Assume product is {product}" if product else "Assume standard SaaS offer context"],
+    }
+    brief = _normalize_brief_json(_safe_json_loads(brief_text, {}), fallback=brief_fallback)
+
+    planner_text = _extract_message_text(
+        agent(
+            planner_prompt(
+                normalized_brief_json=json.dumps(brief, ensure_ascii=False),
+                language_rules=language_rules,
+            )
+        )
+    )
+    plan = _normalize_planner_json(_safe_json_loads(planner_text, {}), brief=brief)
+
+    generated_output = _extract_message_text(
+        agent(
+            generator_prompt(
+                normalized_brief_json=json.dumps(brief, ensure_ascii=False),
+                planner_json=json.dumps(plan, ensure_ascii=False),
+                user_prompt=user_prompt,
+                language_rules=language_rules,
+            )
+        )
+    )
+    if not generated_output:
+        raise RuntimeError("Generator stage produced empty output.")
+
+    evaluator_text = _extract_message_text(
+        agent(
+            evaluator_prompt(
+                normalized_brief_json=json.dumps(brief, ensure_ascii=False),
+                planner_json=json.dumps(plan, ensure_ascii=False),
+                generated_output=generated_output,
+                channel=channel,
+                product=product,
+                audience=audience,
+                objective=objective,
+                language_rules=language_rules,
+            )
+        )
+    )
+    evaluation = _normalize_evaluator_json(_safe_json_loads(evaluator_text, {}))
+
+    return {
+        "generated_output": generated_output,
+        "brief": brief,
+        "plan": plan,
+        "evaluation": evaluation,
+    }
+
+
 @app.entrypoint
 def invoke(payload: Dict[str, Any]):
     """
@@ -219,6 +529,7 @@ def invoke(payload: Dict[str, Any]):
         extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
         model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
         model_id = _normalize_model_id(model_id)
+        include_trace = bool(marketing_context.get("include_trace", False))
 
         if channel and channel.lower() not in VALID_CHANNELS:
             valid = ", ".join(sorted(VALID_CHANNELS))
@@ -235,28 +546,52 @@ def invoke(payload: Dict[str, Any]):
 
     try:
         language_rules = language_instruction(ui_language)
+        agent = _get_agent(model_id)
+        orchestrator_payload: dict[str, Any] | None = None
 
         if has_structured_context:
-            final_prompt = marketing_prompt(
-                user_prompt=user_prompt,
-                channel=channel,
-                product=product,
-                audience=audience,
-                objective=objective,
-                brand_voice=brand_voice,
-                extra=extra,
-                language_rules=language_rules,
-            )
+            if ORCHESTRATOR_ENABLED:
+                orchestrator_payload = _run_marketing_orchestration(
+                    agent=agent,
+                    user_prompt=user_prompt,
+                    channel=channel,
+                    product=product,
+                    audience=audience,
+                    objective=objective,
+                    brand_voice=brand_voice,
+                    extra=extra,
+                    language_rules=language_rules,
+                )
+                message = orchestrator_payload["generated_output"]
+            else:
+                final_prompt = marketing_prompt(
+                    user_prompt=user_prompt,
+                    channel=channel,
+                    product=product,
+                    audience=audience,
+                    objective=objective,
+                    brand_voice=brand_voice,
+                    extra=extra,
+                    language_rules=language_rules,
+                )
+                result = agent(final_prompt)
+                message = _extract_message_text(result)
         else:
             final_prompt = chat_prompt(user_prompt=user_prompt, language_rules=language_rules)
+            result = agent(final_prompt)
+            message = _extract_message_text(result)
 
-        agent = _get_agent(model_id)
-        result = agent(final_prompt)
-        message = _extract_message_text(result)
         if not message:
             raise RuntimeError("Agent returned an invalid response payload.")
 
-        return {"result": message}
+        output: Dict[str, Any] = {"result": message}
+        if include_trace and orchestrator_payload:
+            output["orchestrator"] = {
+                "brief": orchestrator_payload.get("brief"),
+                "plan": orchestrator_payload.get("plan"),
+                "evaluation": orchestrator_payload.get("evaluation"),
+            }
+        return output
 
     except Exception as exc:  # pragma: no cover - ensures runtime safety for unexpected model/tool errors
         if _is_credentials_error(exc):
