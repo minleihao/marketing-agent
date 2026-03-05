@@ -1571,12 +1571,20 @@ APP_HTML = """
       gap:10px;
       padding:6px 10px;
     }
+    .global-left {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+    }
     .global-title {
       font-family:"Sora","IBM Plex Sans",sans-serif;
       font-size:15px;
       font-weight:700;
       letter-spacing:.2px;
+      white-space:nowrap;
     }
+    .mobile-sidebar-btn { display:none; }
     .global-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
     .root {
       min-height:0;
@@ -1643,6 +1651,14 @@ APP_HTML = """
       padding:0;
       border-width:0;
       box-shadow:none;
+    }
+    .sidebar-backdrop {
+      display:none;
+      position:fixed;
+      inset:0;
+      background:rgba(14,24,41,.22);
+      backdrop-filter: blur(3px);
+      z-index:35;
     }
     .topline { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
     .topline-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -2180,14 +2196,48 @@ APP_HTML = """
     @media (max-width: 900px) {
       body { background:linear-gradient(160deg,var(--bg),var(--bg-soft)); }
       .app-shell { padding:6px; gap:6px; }
-      .global-bar { border-radius:12px; padding:7px; }
+      .global-bar {
+        border-radius:12px;
+        padding:7px;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+      }
+      .global-left { justify-content:space-between; }
       .global-title { font-size:14px; }
+      .mobile-sidebar-btn {
+        display:inline-flex;
+        width:auto;
+        padding:6px 10px;
+        font-size:12px;
+      }
+      .global-actions {
+        width:100%;
+        justify-content:flex-start;
+        flex-wrap:nowrap;
+        overflow-x:auto;
+        padding-bottom:2px;
+      }
+      .global-actions > .btn { flex:0 0 auto; }
       .root { grid-template-columns:1fr; gap:8px; }
       .root.sidebar-collapsed { grid-template-columns:1fr; }
       .sidebar, .main { border-radius:16px; }
-      .sidebar { height:36vh; border-right:1px solid var(--line); }
+      .sidebar {
+        position:fixed;
+        left:8px;
+        top:84px;
+        bottom:8px;
+        width:min(88vw, 340px);
+        height:auto;
+        max-height:none;
+        border-right:1px solid var(--line);
+        transform:translateX(calc(-100% - 12px));
+        transition:transform .18s ease;
+        z-index:40;
+      }
+      .root.mobile-sidebar-open .sidebar { transform:translateX(0); }
+      .root.mobile-sidebar-open .sidebar-backdrop { display:block; }
       .splitter, .side-toggle-btn { display:none; }
-      .global-actions { width:100%; justify-content:flex-start; }
       .quick-actions { grid-template-columns:1fr; }
       .shared-kb-bind-grid { grid-template-columns:1fr; }
       .head-controls { grid-template-columns:1fr; }
@@ -2199,13 +2249,17 @@ APP_HTML = """
       .composer { max-height:40vh; }
       .trace-grid { grid-template-columns:1fr; }
       .trace-tools select { min-width:120px; width:100%; }
+      .sidebar-backdrop { display:none; }
     }
   </style>
 </head>
 <body>
   <div class="app-shell">
     <div class="global-bar">
-      <div class="global-title" data-i18n="app_brand">Marketing Copilot</div>
+      <div class="global-left">
+        <button class="btn mobile-sidebar-btn" type="button" id="mobile-sidebar-btn" onclick="toggleMobileSidebar()">Menu</button>
+        <div class="global-title" data-i18n="app_brand">Marketing Copilot</div>
+      </div>
       <div class="global-actions">
         <div class="lang">
           <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
@@ -2237,6 +2291,7 @@ APP_HTML = """
         <div class="badge" id="user-badge"></div>
         <div class="chat-list" id="chat-list"></div>
       </aside>
+      <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeMobileSidebar()"></div>
       <div class="splitter" id="sidebar-splitter" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
 
       <section class="main">
@@ -2431,6 +2486,8 @@ const I18N = {
     conversation_list: '会话记录',
     sidebar_collapse: '收起侧栏',
     sidebar_expand: '展开侧栏',
+    mobile_sidebar_open: '菜单',
+    mobile_sidebar_close: '关闭',
     new_conversation: '+ 新对话',
     new_chat_conversation: '+ 新对话',
     new_marketing_conversation: '+ 营销任务',
@@ -2560,6 +2617,8 @@ const I18N = {
     conversation_list: 'Conversations',
     sidebar_collapse: 'Collapse Sidebar',
     sidebar_expand: 'Expand Sidebar',
+    mobile_sidebar_open: 'Menu',
+    mobile_sidebar_close: 'Close',
     new_conversation: '+ New Chat',
     new_chat_conversation: '+ Chat',
     new_marketing_conversation: '+ Marketing',
@@ -2714,6 +2773,7 @@ if (!Number.isFinite(sidebarWidth)) {
 let sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
 let sidebarResizerBound = false;
 let sidebarResizing = false;
+let mobileSidebarOpen = false;
 
 function currentConversation() {
   return conversations.find((x) => x.id === activeConversationId) || null;
@@ -2761,6 +2821,17 @@ function clampSidebarWidth(width) {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, num));
 }
 
+function isMobileLayout() {
+  return window.innerWidth <= 900;
+}
+
+function syncMobileSidebarButton() {
+  const btn = document.getElementById('mobile-sidebar-btn');
+  if (!btn) return;
+  btn.textContent = mobileSidebarOpen ? t('mobile_sidebar_close') : t('mobile_sidebar_open');
+  btn.setAttribute('aria-expanded', mobileSidebarOpen ? 'true' : 'false');
+}
+
 function syncSidebarToggleButton() {
   const btn = document.getElementById('toggle-sidebar-btn');
   if (!btn) return;
@@ -2770,22 +2841,42 @@ function syncSidebarToggleButton() {
 function applySidebarLayout() {
   const root = document.getElementById('app-root');
   if (!root) return;
-  if (window.innerWidth <= 900) {
+  if (isMobileLayout()) {
     root.classList.remove('sidebar-collapsed');
+    root.classList.toggle('mobile-sidebar-open', mobileSidebarOpen);
     root.style.removeProperty('--sidebar-width');
     syncSidebarToggleButton();
+    syncMobileSidebarButton();
     return;
   }
+  mobileSidebarOpen = false;
+  root.classList.remove('mobile-sidebar-open');
   sidebarWidth = clampSidebarWidth(sidebarWidth);
   root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
   root.classList.toggle('sidebar-collapsed', sidebarCollapsed);
   syncSidebarToggleButton();
+  syncMobileSidebarButton();
 }
 
 function toggleSidebar() {
-  if (window.innerWidth <= 900) return;
+  if (isMobileLayout()) {
+    toggleMobileSidebar();
+    return;
+  }
   sidebarCollapsed = !sidebarCollapsed;
   localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0');
+  applySidebarLayout();
+}
+
+function toggleMobileSidebar() {
+  if (!isMobileLayout()) return;
+  mobileSidebarOpen = !mobileSidebarOpen;
+  applySidebarLayout();
+}
+
+function closeMobileSidebar() {
+  if (!isMobileLayout() || !mobileSidebarOpen) return;
+  mobileSidebarOpen = false;
   applySidebarLayout();
 }
 
@@ -2803,7 +2894,7 @@ function bindSidebarResizer() {
   };
 
   splitter.addEventListener('mousedown', (event) => {
-    if (window.innerWidth <= 900 || sidebarCollapsed) return;
+    if (isMobileLayout() || sidebarCollapsed) return;
     sidebarResizing = true;
     document.body.classList.add('sidebar-resizing');
     updateWidthFromClientX(event.clientX);
@@ -2811,7 +2902,7 @@ function bindSidebarResizer() {
   });
 
   splitter.addEventListener('click', () => {
-    if (window.innerWidth <= 900) return;
+    if (isMobileLayout()) return;
     if (sidebarCollapsed && !sidebarResizing) {
       toggleSidebar();
     }
@@ -2831,6 +2922,11 @@ function bindSidebarResizer() {
 
   window.addEventListener('resize', () => {
     applySidebarLayout();
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeMobileSidebar();
+    }
   });
 }
 
@@ -3905,6 +4001,7 @@ async function createConversation(taskMode='chat') {
   await syncKBSelects();
   syncTaskModeUI();
   syncConversationVisibilityUI();
+  closeMobileSidebar();
 }
 
 async function openConversation(id) {
@@ -3922,6 +4019,7 @@ async function openConversation(id) {
   await syncKBSelects();
   syncTaskModeUI();
   syncConversationVisibilityUI();
+  closeMobileSidebar();
 }
 
 async function changeModel() {
@@ -4846,7 +4944,17 @@ GROUPS_HTML = """
     .small { font-size:12px; color:#5b6b80; }
     .ok { color:#0f766e; }
     .warn { color:#b91c1c; }
-    @media (max-width: 980px) { .layout { grid-template-columns:1fr; } }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns:1fr; }
+      .top { flex-direction:column; align-items:flex-start; }
+      .toolbar {
+        width:100%;
+        flex-wrap:nowrap;
+        overflow-x:auto;
+        padding-bottom:2px;
+      }
+      .toolbar button { flex:0 0 auto; }
+    }
   </style>
 </head>
 <body>
@@ -5324,6 +5432,14 @@ ADMIN_HTML = """
     *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
     *::-webkit-scrollbar-track { background:transparent; }
     @media (max-width: 980px) {
+      .top { flex-direction:column; align-items:flex-start; }
+      .toolbar {
+        width:100%;
+        flex-wrap:nowrap;
+        overflow-x:auto;
+        padding-bottom:2px;
+      }
+      .toolbar button { flex:0 0 auto; }
       .create-form { grid-template-columns:1fr; }
       .small { width:100%; }
     }
