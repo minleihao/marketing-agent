@@ -4675,14 +4675,34 @@ async function api(url, options={}) {
   const res = await fetch(url, {headers, ...options});
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error(data.detail || 'Request failed');
+  if (!res.ok) {
+    const err = new Error(data.detail || 'Request failed');
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 async function loadCsrfToken() {
   const res = await fetch('/api/csrf');
-  if (!res.ok) throw new Error('csrf');
+  if (!res.ok) {
+    let data = {};
+    try { data = await res.json(); } catch {}
+    const err = new Error(data.detail || 'csrf');
+    err.status = res.status;
+    throw err;
+  }
   const data = await res.json();
   csrfToken = data.csrf_token || '';
+}
+function isAuthError(err) {
+  const status = err && typeof err === 'object' ? err.status : null;
+  return status === 401 || status === 403;
+}
+function setInitError(message) {
+  const msg = document.getElementById('create-msg');
+  if (!msg) return;
+  msg.textContent = `${t('save_fail')}: ${message || t('save_fail')}`;
+  msg.className = 'small warn';
 }
 function parseJSON(raw, fallback) {
   const text = (raw || '').trim();
@@ -5323,8 +5343,12 @@ function gotoExperiments() { location.href = '/experiments'; }
   try {
     await loadCsrfToken();
     await refreshData();
-  } catch {
-    location.href = '/';
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    setInitError(e.message || 'init');
   }
 })();
 </script>
@@ -6192,9 +6216,7 @@ async function loadCsrfToken() {
 
 function isAuthError(err) {
   const status = err && typeof err === 'object' ? err.status : null;
-  if (status === 401 || status === 403) return true;
-  const msg = String((err && err.message) || '').toLowerCase();
-  return msg.includes('unauthorized') || msg.includes('forbidden');
+  return status === 401 || status === 403;
 }
 
 function renderConversationSelect() {
