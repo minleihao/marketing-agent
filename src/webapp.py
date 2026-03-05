@@ -970,7 +970,7 @@ def _normalize_kb_structured_fields_with_llm(
 
     if needs_llm:
         prompt = f"""
-Convert this Brand KB draft into a strict JSON object.
+Convert this Brand Knowledge Base draft into a strict JSON object.
 
 Required keys and formats:
 - positioning: object
@@ -1066,7 +1066,7 @@ def _build_brand_kb_context(kb_key: str | None, kb_version: int | None) -> str:
 
     parts = [
         "Shared brand knowledge context (apply when relevant):",
-        f"- KB: {row['kb_name']} (key={row['kb_key']}, version={row['version']})",
+        f"- Knowledge Base: {row['kb_name']} (key={row['kb_key']}, version={row['version']})",
     ]
     if row["brand_voice"]:
         parts.append(f"- Brand voice: {row['brand_voice']}")
@@ -1654,6 +1654,11 @@ APP_HTML = """
       white-space:nowrap;
     }
     .quick-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+    .quick-secondary {
+      display:grid;
+      grid-template-columns:1fr;
+      gap:6px;
+    }
     .badge {
       font-size:12px;
       color:var(--muted);
@@ -2069,6 +2074,24 @@ APP_HTML = """
       margin-bottom:6px;
     }
     .brief-card.hidden { display:none; }
+    .shared-kb-bind {
+      border:1px solid var(--line);
+      background:linear-gradient(180deg,rgba(250,253,255,.62),rgba(248,253,251,.54));
+      border-radius:12px;
+      padding:8px;
+      margin-bottom:6px;
+    }
+    .shared-kb-bind-grid {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px;
+    }
+    .shared-kb-bind label {
+      font-size:12px;
+      color:var(--muted);
+      display:block;
+      margin-bottom:4px;
+    }
     .brief-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     .brief-grid .full { grid-column:1 / -1; }
     .brief-grid label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
@@ -2166,6 +2189,7 @@ APP_HTML = """
       .splitter, .side-toggle-btn { display:none; }
       .global-actions { width:100%; justify-content:flex-start; }
       .quick-actions { grid-template-columns:1fr; }
+      .shared-kb-bind-grid { grid-template-columns:1fr; }
       .head-controls { grid-template-columns:1fr; }
       .msg { max-width:96%; }
       .brief-grid { grid-template-columns:1fr; }
@@ -2187,7 +2211,6 @@ APP_HTML = """
           <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
           <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
         </div>
-        <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">KB 管理</button>
         <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
         <button class="btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button class="btn" onclick="changePassword()" data-i18n="change_password">修改密码</button>
@@ -2206,6 +2229,9 @@ APP_HTML = """
           <div class="quick-actions">
             <button class="btn accent" onclick="createConversation('chat')" data-i18n="new_chat_conversation">+ 新对话</button>
             <button class="btn" onclick="createConversation('marketing')" data-i18n="new_marketing_conversation">+ 营销任务</button>
+          </div>
+          <div class="quick-secondary">
+            <button class="btn" onclick="gotoKB()" data-i18n="kb_mgmt">Knowledge Base 管理</button>
           </div>
         </div>
         <div class="badge" id="user-badge"></div>
@@ -2312,6 +2338,18 @@ APP_HTML = """
           <button class="btn" type="button" id="toggle-composer-btn" onclick="toggleComposer()">收起</button>
         </div>
         <div class="composer-content" id="composer-content">
+        <div class="shared-kb-bind">
+          <div class="shared-kb-bind-grid">
+            <div>
+              <label for="kb-select" data-i18n="kb_label">Knowledge Base</label>
+              <select id="kb-select" onchange="changeKBKey()"></select>
+            </div>
+            <div>
+              <label for="kb-version-select" data-i18n="kb_version_label">Knowledge Base Version</label>
+              <select id="kb-version-select" onchange="changeKBVersion()"></select>
+            </div>
+          </div>
+        </div>
         <div class="brief-card hidden" id="marketing-brief">
           <div class="brief-grid">
             <div>
@@ -2327,10 +2365,6 @@ APP_HTML = """
               </select>
             </div>
             <div>
-              <label for="kb-select" data-i18n="kb_label">Brand KB</label>
-              <select id="kb-select" onchange="changeKBKey()"></select>
-            </div>
-            <div>
               <label for="brief-product" data-i18n="brief_product">Product</label>
               <input id="brief-product" />
             </div>
@@ -2341,10 +2375,6 @@ APP_HTML = """
             <div>
               <label for="brief-objective" data-i18n="brief_objective">Objective</label>
               <input id="brief-objective" />
-            </div>
-            <div>
-              <label for="kb-version-select" data-i18n="kb_version_label">Version</label>
-              <select id="kb-version-select" onchange="changeKBVersion()"></select>
             </div>
             <div class="full">
               <label for="brief-extra" data-i18n="brief_extra_requirements">Extra Requirements</label>
@@ -2411,10 +2441,10 @@ const I18N = {
     thinking_depth_medium: '深入（2x）',
     thinking_depth_high: '深度（4x）',
     mode_label: '任务模式',
-    kb_label: '品牌知识库',
-    kb_version_label: '版本',
-    kb_create: '新建KB版本',
-    kb_mgmt: 'KB 管理',
+    kb_label: 'Knowledge Base',
+    kb_version_label: 'Knowledge Base 版本',
+    kb_create: '新建 Knowledge Base 版本',
+    kb_mgmt: 'Knowledge Base 管理',
     group_mgmt: '组管理',
     experiments_nav: '实验中心',
     change_password: '修改密码',
@@ -2466,15 +2496,15 @@ const I18N = {
     rename_prompt: '输入新的聊天名称',
     no_chat_selected: '请先选择一个聊天',
     documents_title: '文档',
-    kb_none: '不使用KB',
-    kb_no_version: '无可用版本',
-    kb_key_prompt: '输入 KB Key（建议英文）',
-    kb_key_required: 'KB Key 不能为空',
-    kb_name_prompt: '输入 KB 名称',
+    kb_none: '不使用 Knowledge Base',
+    kb_no_version: '无可用 Knowledge Base 版本',
+    kb_key_prompt: '输入 Knowledge Base Key（建议英文）',
+    kb_key_required: 'Knowledge Base Key 不能为空',
+    kb_name_prompt: '输入 Knowledge Base 名称',
     kb_brand_voice_prompt: '输入品牌语调（可选）',
     kb_notes_prompt: '输入备注（可选）',
-    kb_create_success: 'KB 版本已创建:',
-    kb_create_failed: '创建 KB 失败',
+    kb_create_success: 'Knowledge Base 版本已创建:',
+    kb_create_failed: '创建 Knowledge Base 失败',
     export_failed: '导出失败',
     rename_failed: '重命名失败',
     conversations_empty: '还没有会话，点击上方按钮开始。',
@@ -2540,10 +2570,10 @@ const I18N = {
     thinking_depth_medium: 'Deep (2x)',
     thinking_depth_high: 'Maximum (4x)',
     mode_label: 'Task Mode',
-    kb_label: 'Brand KB',
-    kb_version_label: 'Version',
-    kb_create: 'New KB Version',
-    kb_mgmt: 'KB Management',
+    kb_label: 'Knowledge Base',
+    kb_version_label: 'Knowledge Base Version',
+    kb_create: 'New Knowledge Base Version',
+    kb_mgmt: 'Knowledge Base Management',
     group_mgmt: 'Group Management',
     experiments_nav: 'Experiments',
     change_password: 'Change Password',
@@ -2595,15 +2625,15 @@ const I18N = {
     rename_prompt: 'Enter a new conversation title',
     no_chat_selected: 'Please select a conversation first',
     documents_title: 'Documents',
-    kb_none: 'No KB',
-    kb_no_version: 'No versions',
-    kb_key_prompt: 'Enter KB key (recommended: lowercase id)',
-    kb_key_required: 'KB key is required',
-    kb_name_prompt: 'Enter KB display name',
+    kb_none: 'No Knowledge Base',
+    kb_no_version: 'No Knowledge Base versions',
+    kb_key_prompt: 'Enter Knowledge Base key (recommended: lowercase id)',
+    kb_key_required: 'Knowledge Base key is required',
+    kb_name_prompt: 'Enter Knowledge Base display name',
     kb_brand_voice_prompt: 'Enter brand voice (optional)',
     kb_notes_prompt: 'Enter notes (optional)',
-    kb_create_success: 'KB version created:',
-    kb_create_failed: 'Failed to create KB',
+    kb_create_success: 'Knowledge Base version created:',
+    kb_create_failed: 'Failed to create Knowledge Base',
     export_failed: 'Export failed',
     rename_failed: 'Rename failed',
     conversations_empty: 'No conversations yet. Start one from above.',
@@ -4132,101 +4162,196 @@ KB_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Marketing Copilot - KB</title>
+  <title>Marketing Copilot - Knowledge Base</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
     :root {
-      --bg:#eef4ff;
-      --line:#d6dfec;
-      --line-strong:#bfcee3;
-      --txt:#0f1b2d;
-      --muted:#55657d;
-      --accent:#0a67d3;
+      --bg:#dce7f5;
+      --bg-soft:#dceee7;
+      --line:rgba(170,186,209,.55);
+      --line-strong:rgba(136,160,191,.68);
+      --txt:#102037;
+      --muted:#4f647f;
+      --accent:#0b6fde;
       --danger:#c63939;
       --ok:#0f766e;
-      --shadow:0 18px 36px rgba(16,32,62,.12);
+      --shadow:0 22px 44px rgba(17,35,62,.16);
     }
     * { box-sizing:border-box; }
     body {
       margin:0;
       font-family:"IBM Plex Sans","Segoe UI",sans-serif;
       background:
-        radial-gradient(920px 520px at 0% -10%,#d8e7ff 0%,transparent 58%),
-        radial-gradient(980px 560px at 106% -16%,#d7f3e8 0%,transparent 62%),
-        linear-gradient(160deg,#edf4ff,#f5fbf6);
+        radial-gradient(980px 580px at -4% -20%,#eef5ff 0%,transparent 62%),
+        radial-gradient(920px 520px at 104% -24%,#e8fff4 0%,transparent 64%),
+        radial-gradient(760px 480px at 50% 108%,#eaf1ff 0%,transparent 68%),
+        linear-gradient(160deg,var(--bg),var(--bg-soft));
       color:var(--txt);
+      min-height:100vh;
     }
-    .wrap { max-width:1220px; margin:16px auto; padding:0 14px; }
-    .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
-    .top h2 { font-family:"Sora","IBM Plex Sans",sans-serif; margin:0; }
-    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .toolbar button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .layout { display:grid; grid-template-columns: 330px 1fr; gap:12px; }
+    body::before {
+      content:"";
+      position:fixed;
+      inset:-18%;
+      pointer-events:none;
+      background:
+        radial-gradient(520px 300px at 18% 24%,rgba(255,255,255,.42),transparent 70%),
+        radial-gradient(500px 280px at 82% 14%,rgba(255,255,255,.34),transparent 72%),
+        radial-gradient(600px 340px at 60% 84%,rgba(255,255,255,.24),transparent 74%);
+      filter:blur(16px) saturate(120%);
+      opacity:.9;
+      z-index:0;
+    }
+    .wrap {
+      max-width:1240px;
+      margin:14px auto;
+      padding:0 12px;
+      position:relative;
+      z-index:1;
+    }
+    .top {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      margin-bottom:10px;
+      padding:8px 10px;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.56);
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(22px) saturate(145%);
+    }
+    .top h2 {
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      margin:0;
+      font-size:19px;
+      letter-spacing:.1px;
+    }
+    .toolbar {
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+    .lang {
+      display:flex;
+      gap:6px;
+      padding:4px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:rgba(255,255,255,.52);
+      backdrop-filter: blur(14px);
+    }
+    .lang button {
+      width:auto;
+      padding:5px 10px;
+      border-radius:999px;
+      border:0;
+      box-shadow:none;
+      background:transparent;
+    }
+    .lang button.active {
+      background:var(--accent);
+      color:#fff;
+    }
+    .top-tabs {
+      display:flex;
+      gap:6px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .tab-btn {
+      width:auto;
+      padding:6px 9px;
+      font-size:12px;
+      border-radius:10px;
+    }
+    .layout {
+      display:grid;
+      grid-template-columns: 320px 1fr;
+      gap:10px;
+    }
     .card {
-      background:rgba(255,255,255,.88);
+      background:rgba(255,255,255,.56);
       border:1px solid var(--line);
       border-radius:18px;
-      padding:14px;
+      padding:12px;
       box-shadow:var(--shadow);
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(22px) saturate(145%);
     }
-    .card h3 { margin:0 0 10px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:17px; }
+    .card h3 {
+      margin:0 0 8px;
+      font-family:"Sora","IBM Plex Sans",sans-serif;
+      font-size:16px;
+    }
     .list { display:flex; flex-direction:column; gap:8px; max-height:620px; overflow:auto; padding-right:2px; }
     .item {
       border:1px solid var(--line);
-      border-radius:12px;
-      padding:9px;
+      border-radius:11px;
+      padding:8px;
       cursor:pointer;
-      background:#fff;
+      background:rgba(255,255,255,.62);
       transition:.16s ease;
     }
     .item:hover { transform:translateY(-1px); border-color:var(--line-strong); }
     .item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
-    .item .name { font-weight:700; font-size:14px; }
-    .item .meta { color:var(--muted); font-size:12px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
-    .grid { display:grid; gap:10px; grid-template-columns:1fr 1fr; }
+    .item .name { font-weight:700; font-size:13px; }
+    .item .meta { color:var(--muted); font-size:11px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+    .grid { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
     .full { grid-column:1 / -1; }
-    label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; font-weight:600; }
+    label { font-size:11px; color:var(--muted); display:block; margin-bottom:4px; font-weight:600; }
     input, select, textarea, button {
       width:100%;
       box-sizing:border-box;
-      padding:9px 10px;
-      border-radius:11px;
+      padding:8px 9px;
+      border-radius:10px;
       border:1px solid var(--line);
       font-family:inherit;
       transition:.16s ease;
       color:var(--txt);
-      background:#fff;
+      background:rgba(255,255,255,.62);
+      backdrop-filter: blur(12px) saturate(130%);
     }
     input:focus, select:focus, textarea:focus {
       outline:none;
       border-color:var(--accent);
       box-shadow:0 0 0 3px rgba(10,103,211,.14);
     }
-    textarea { min-height:96px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
+    textarea { min-height:90px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
     button { cursor:pointer; font-weight:600; }
     button:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 14px rgba(15,30,60,.07); }
     button.primary { background:linear-gradient(120deg,var(--accent),#0987cf); border-color:transparent; color:#fff; }
-    .actions { display:flex; gap:8px; flex-wrap:wrap; }
-    .actions button { width:auto; }
+    .actions {
+      display:flex;
+      gap:6px;
+      flex-wrap:wrap;
+      justify-content:flex-start;
+    }
+    .actions button {
+      width:auto;
+      padding:6px 9px;
+      font-size:12px;
+    }
     .msg {
       font-size:12px;
-      margin-top:10px;
+      margin-top:8px;
       color:var(--ok);
       min-height:20px;
       border-radius:10px;
-      background:#f3fdf9;
+      background:rgba(243,253,249,.7);
       border:1px solid #bde9d9;
       padding:7px 10px;
     }
-    .warn { color:var(--danger); background:#fff6f6; border-color:#f0c9c9; }
+    .warn { color:var(--danger); background:rgba(255,246,246,.74); border-color:#f0c9c9; }
     .empty {
       border:1px dashed var(--line-strong);
       border-radius:12px;
-      padding:13px;
+      padding:12px;
       text-align:center;
       color:var(--muted);
-      background:rgba(255,255,255,.62);
+      background:rgba(255,255,255,.54);
       font-size:13px;
     }
     *::-webkit-scrollbar { width:10px; height:10px; }
@@ -4234,7 +4359,9 @@ KB_HTML = """
     *::-webkit-scrollbar-track { background:transparent; }
     @media (max-width: 960px) {
       .layout { grid-template-columns:1fr; }
-      .toolbar { justify-content:flex-start; }
+      .top { flex-direction:column; align-items:flex-start; }
+      .toolbar { justify-content:flex-start; width:100%; }
+      .top-tabs { width:100%; }
       .actions button { width:100%; }
     }
   </style>
@@ -4242,24 +4369,28 @@ KB_HTML = """
 <body>
   <div class="wrap">
     <div class="top">
-      <h2 data-i18n="title">Brand KB 管理</h2>
+      <h2 data-i18n="title">Knowledge Base 管理</h2>
       <div class="toolbar">
-        <button id="lang-zh" onclick="setLang('zh')">中文</button>
-        <button id="lang-en" onclick="setLang('en')">EN</button>
-        <button onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
-        <button onclick="backToApp()" data-i18n="back">返回聊天</button>
-        <button onclick="logout()" data-i18n="logout">退出</button>
+        <div class="lang">
+          <button id="lang-zh" onclick="setLang('zh')">中文</button>
+          <button id="lang-en" onclick="setLang('en')">EN</button>
+        </div>
+        <div class="top-tabs">
+          <button class="tab-btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
+          <button class="tab-btn" onclick="backToApp()" data-i18n="back">返回聊天</button>
+          <button class="tab-btn" onclick="logout()" data-i18n="logout">退出</button>
+        </div>
       </div>
     </div>
     <div class="layout">
       <div class="card">
-        <h3 data-i18n="kb_list">KB 列表</h3>
+        <h3 data-i18n="kb_list">Knowledge Base 列表</h3>
         <div id="kb-list" class="list"></div>
       </div>
       <div class="card">
         <div class="grid">
           <div>
-            <label for="kb-key-select" data-i18n="select_key">选择 KB Key</label>
+            <label for="kb-key-select" data-i18n="select_key">选择 Knowledge Base Key</label>
             <select id="kb-key-select" onchange="changeKBKey()"></select>
           </div>
           <div>
@@ -4283,7 +4414,7 @@ KB_HTML = """
             <input id="kb-key-input" placeholder="brand_main" />
           </div>
           <div>
-            <label for="kb-name" data-i18n="kb_name">KB 名称</label>
+            <label for="kb-name" data-i18n="kb_name">Knowledge Base 名称</label>
             <input id="kb-name" />
           </div>
           <div>
@@ -4331,12 +4462,12 @@ KB_HTML = """
 <script>
 const I18N = {
   zh: {
-    title: 'Brand KB 管理',
+    title: 'Knowledge Base 管理',
     experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
-    kb_list: 'KB 列表',
-    select_key: '选择 KB Key',
+    kb_list: 'Knowledge Base 列表',
+    select_key: '选择 Knowledge Base Key',
     select_version: '选择版本',
     visibility_label: '可见范围',
     visibility_private: '仅自己',
@@ -4345,7 +4476,7 @@ const I18N = {
     group_label: '共享组',
     no_group_needed: '无需组',
     new_key: '新版本目标 Key（可新建）',
-    kb_name: 'KB 名称',
+    kb_name: 'Knowledge Base 名称',
     brand_voice: '品牌语调',
     positioning: '定位（JSON 或自然语言）',
     glossary: '术语表（JSON 数组或自然语言）',
@@ -4362,19 +4493,19 @@ const I18N = {
     create_ok: '新版本创建成功',
     update_ok: '版本更新成功',
     delete_ok: '版本删除成功',
-    delete_confirm: '确定删除该 KB 版本吗？',
-    required_key: '请输入 KB Key',
+    delete_confirm: '确定删除该 Knowledge Base 版本吗？',
+    required_key: '请输入 Knowledge Base Key',
     invalid_json: 'JSON 格式错误',
-    kb_empty: '还没有 KB 版本，请先在右侧创建。',
+    kb_empty: '还没有 Knowledge Base 版本，请先在右侧创建。',
     shared_from: '共享自'
   },
   en: {
-    title: 'Brand KB Management',
+    title: 'Knowledge Base Management',
     experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
-    kb_list: 'KB List',
-    select_key: 'Select KB Key',
+    kb_list: 'Knowledge Base List',
+    select_key: 'Select Knowledge Base Key',
     select_version: 'Select Version',
     visibility_label: 'Visibility',
     visibility_private: 'Private',
@@ -4383,7 +4514,7 @@ const I18N = {
     group_label: 'Share Group',
     no_group_needed: 'No group needed',
     new_key: 'Target key for new version',
-    kb_name: 'KB Name',
+    kb_name: 'Knowledge Base Name',
     brand_voice: 'Brand Voice',
     positioning: 'Positioning (JSON or natural language)',
     glossary: 'Glossary (JSON array or natural language)',
@@ -4400,10 +4531,10 @@ const I18N = {
     create_ok: 'Version created',
     update_ok: 'Version updated',
     delete_ok: 'Version deleted',
-    delete_confirm: 'Delete this KB version?',
-    required_key: 'KB key is required',
+    delete_confirm: 'Delete this Knowledge Base version?',
+    required_key: 'Knowledge Base key is required',
     invalid_json: 'Invalid JSON',
-    kb_empty: 'No KB versions yet. Create one from the form.',
+    kb_empty: 'No Knowledge Base versions yet. Create one from the form.',
     shared_from: 'Shared from'
   }
 };
@@ -5580,7 +5711,7 @@ EXPERIMENTS_HTML = """
         <button id="lang-zh" onclick="setLang('zh')">中文</button>
         <button id="lang-en" onclick="setLang('en')">EN</button>
         <button onclick="gotoApp()" data-i18n="back">返回聊天</button>
-        <button onclick="gotoKB()" data-i18n="kb_nav">KB 管理</button>
+        <button onclick="gotoKB()" data-i18n="kb_nav">Knowledge Base 管理</button>
         <button onclick="gotoGroups()" data-i18n="group_nav">组管理</button>
         <button onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="admin_nav">用户管理</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
@@ -5675,7 +5806,7 @@ const I18N = {
   zh: {
     title: '实验中心',
     back: '返回聊天',
-    kb_nav: 'KB 管理',
+    kb_nav: 'Knowledge Base 管理',
     group_nav: '组管理',
     admin_nav: '用户管理',
     logout: '退出',
@@ -5724,7 +5855,7 @@ const I18N = {
   en: {
     title: 'Experiments',
     back: 'Back to Chat',
-    kb_nav: 'KB Management',
+    kb_nav: 'Knowledge Base Management',
     group_nav: 'Group Management',
     admin_nav: 'User Management',
     logout: 'Log Out',
@@ -6881,7 +7012,7 @@ def list_brand_kb_versions(kb_key: str, request: Request) -> Any:
             (user["id"], key, user["id"]),
         ).fetchall()
     if not rows:
-        raise HTTPException(status_code=404, detail="KB not found")
+        raise HTTPException(status_code=404, detail="Knowledge Base not found")
     return [_kb_row_to_dict(r) for r in rows]
 
 
@@ -6935,7 +7066,7 @@ def get_brand_kb(kb_key: str, request: Request, version: int | None = None) -> A
                 (user["id"], key, version, user["id"]),
             ).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="KB not found")
+        raise HTTPException(status_code=404, detail="Knowledge Base not found")
     return _kb_row_to_dict(row)
 
 
@@ -7016,9 +7147,9 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
             (key, version),
         ).fetchone()
     if not existing:
-        raise HTTPException(status_code=404, detail="KB version not found")
+        raise HTTPException(status_code=404, detail="Knowledge Base version not found")
     if existing["owner_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Only owner can update this KB version")
+        raise HTTPException(status_code=403, detail="Only owner can update this Knowledge Base version")
 
     visibility, share_group_id = _validate_share_group_for_user(
         user["id"],
@@ -7087,15 +7218,15 @@ def delete_brand_kb(kb_key: str, version: int, request: Request) -> Any:
             (key, version),
         ).fetchone()
         if not exists:
-            raise HTTPException(status_code=404, detail="KB version not found")
+            raise HTTPException(status_code=404, detail="Knowledge Base version not found")
         if exists["owner_id"] != user["id"]:
-            raise HTTPException(status_code=403, detail="Only owner can delete this KB version")
+            raise HTTPException(status_code=403, detail="Only owner can delete this Knowledge Base version")
         in_use = conn.execute(
             "SELECT id FROM conversations WHERE kb_key = ? AND kb_version = ? LIMIT 1",
             (key, version),
         ).fetchone()
         if in_use:
-            raise HTTPException(status_code=400, detail="KB version is currently used by a conversation")
+            raise HTTPException(status_code=400, detail="Knowledge Base version is currently used by a conversation")
         conn.execute(
             "DELETE FROM brand_kb_versions WHERE kb_key = ? AND version = ?",
             (key, version),
@@ -7301,7 +7432,7 @@ def update_conversation_kb(conversation_id: int, body: ConversationKBInput, requ
     has_version = body.kb_version is not None
     if has_key or has_version:
         if not has_key or not has_version:
-            raise HTTPException(status_code=400, detail="Both kb_key and kb_version are required")
+            raise HTTPException(status_code=400, detail="Both Knowledge Base key and version are required")
         kb_key = _normalize_kb_key(body.kb_key or "")
         kb_version = body.kb_version
         with db_conn() as conn:
@@ -7310,7 +7441,7 @@ def update_conversation_kb(conversation_id: int, body: ConversationKBInput, requ
                 (kb_key, kb_version),
             ).fetchone()
             if not exists:
-                raise HTTPException(status_code=404, detail="KB version not found")
+                raise HTTPException(status_code=404, detail="Knowledge Base version not found")
             kb_row = conn.execute(
                 """
                 SELECT b.kb_name
@@ -7326,7 +7457,7 @@ def update_conversation_kb(conversation_id: int, body: ConversationKBInput, requ
                 (user["id"], kb_key, kb_version, user["id"]),
             ).fetchone()
         if not kb_row:
-            raise HTTPException(status_code=403, detail="No access to this KB version")
+            raise HTTPException(status_code=403, detail="No access to this Knowledge Base version")
         kb_name = kb_row["kb_name"]
 
     now = now_utc().isoformat()

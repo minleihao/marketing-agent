@@ -198,7 +198,7 @@ def test_cannot_bind_private_kb_owned_by_other_user(webapp_module):
             headers=member_headers,
         )
         assert attach_res.status_code == 403
-        assert "No access to this KB version" in attach_res.text
+        assert "No access to this Knowledge Base version" in attach_res.text
 
 
 def test_experiment_lifecycle_api(webapp_module):

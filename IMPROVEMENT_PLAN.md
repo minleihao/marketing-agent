@@ -4,7 +4,7 @@
 - Keep all existing core features stable:
 - user registration/login/user management
 - chat + multi-conversation
-- KB management + sharing permissions
+- Knowledge Base management + sharing permissions
 - bilingual UI
 - Add orchestration, memory/RAG, security hardening, and growth-system scaffolding incrementally.
 - Prioritize production safety: backward-compatible DB migrations and no breaking API contract for existing front-end flows.
@@ -30,7 +30,7 @@
 
 ### Phase B (P1, next)
 - Split monolith `src/webapp.py` into:
-- `routers/` (auth, chat, kb, groups, experiments, admin)
+- `routers/` (auth, chat, knowledge_base, groups, experiments, admin)
 - `services/` (permissions, memory, orchestration persistence, security)
 - `repositories/` (SQL access)
 - `templates/static` for UI assets
@@ -141,7 +141,7 @@
 - `DELETE /api/experiments/{id}`
 
 ## 7) Frontend Updates (Implemented)
-- App/KB/Groups/Admin pages:
+- App/Knowledge Base/Groups/Admin pages:
 - unified CSRF bootstrap + header injection for write operations
 - App page:
 - password change action button
@@ -152,7 +152,7 @@
 - detail meta editing (title/hypothesis/traffic)
 - variant create/update flow
 - experiment delete action
-- Added cross-page navigation entry to Experiments from Chat/KB/Groups/Admin
+- Added cross-page navigation entry to Experiments from Chat/Knowledge Base/Groups/Admin
 - Fixed missing `csrfToken` declaration in Admin page script
 - Added Chat Orchestration Trace panel:
 - BriefNormalizer/Planner/Generator/Evaluator outputs displayed by run
@@ -165,12 +165,12 @@
 - `uv run pytest -q`
 - New API regression coverage in `test/test_webapp.py`:
 - CSRF enforcement (reject + allow paths)
-- private KB binding permission boundary
+- private Knowledge Base binding permission boundary
 - experiments lifecycle API smoke
 
 ### Scenario-level Smoke
 - multi-user group approval and content sharing isolation
-- KB bind permission check (private KB cannot be attached by non-owner)
+- Knowledge Base bind permission check (private Knowledge Base cannot be attached by non-owner)
 - CSRF enforcement on mutating APIs
 - experiment API lifecycle smoke
 

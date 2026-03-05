@@ -46,10 +46,11 @@ This project is unified under one web app entrypoint with:
 - User management
 - Multi-conversation chat UI
 - Task mode per conversation (`chat` / `marketing`)
-- Marketing brief template inputs (`Prompt`, `Channel`, `Product`, `Audience`, `Objective`, `Extra Requirements`, `Brand KB Selector`)
+- Marketing brief template inputs (`Prompt`, `Channel`, `Product`, `Audience`, `Objective`, `Extra Requirements`, `Knowledge Base Selector`)
 - Model selection
 - Document upload
-- Shared multi-version Brand KB with dedicated KB management page (`/kb`) for create/update/delete
+- Shared multi-version Knowledge Base with dedicated Knowledge Base management page (`/kb`) for create/update/delete
+- Conversation-level Knowledge Base binding is available in both `chat` and `marketing` modes
 
 ## Run locally
 
