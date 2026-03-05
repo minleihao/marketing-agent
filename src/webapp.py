@@ -3,6 +3,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 import secrets
 import sqlite3
 import uuid
@@ -345,6 +346,171 @@ def _normalize_string_list(items: list[Any]) -> list[str]:
     return result
 
 
+def _parse_json_value(raw: str) -> Any | None:
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_first_json_object(raw: str) -> dict[str, Any] | None:
+    text = raw.strip()
+    direct = _parse_json_value(text)
+    if isinstance(direct, dict):
+        return direct
+
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S | re.I)
+    if fence_match:
+        fenced = _parse_json_value(fence_match.group(1))
+        if isinstance(fenced, dict):
+            return fenced
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:idx + 1]
+                    parsed = _parse_json_value(candidate)
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
+def _to_kb_prompt_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _to_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return []
+
+
+def _normalize_kb_structured_fields_with_llm(
+    *,
+    positioning: Any,
+    glossary: Any,
+    forbidden_words: Any,
+    required_terms: Any,
+    claims_policy: Any,
+    examples: Any,
+) -> dict[str, Any]:
+    raw_map = {
+        "positioning": positioning,
+        "glossary": glossary,
+        "forbidden_words": forbidden_words,
+        "required_terms": required_terms,
+        "claims_policy": claims_policy,
+        "examples": examples,
+    }
+
+    parsed_map: dict[str, Any] = {}
+    needs_llm = False
+    for key, value in raw_map.items():
+        if value is None:
+            parsed_map[key] = None
+            continue
+        if isinstance(value, (dict, list)):
+            parsed_map[key] = value
+            continue
+        if isinstance(value, str):
+            direct = _parse_json_value(value)
+            if direct is not None:
+                parsed_map[key] = direct
+            else:
+                parsed_map[key] = value
+                if value.strip():
+                    needs_llm = True
+            continue
+        parsed_map[key] = value
+
+    if needs_llm:
+        prompt = f"""
+Convert this Brand KB draft into a strict JSON object.
+
+Required keys and formats:
+- positioning: object
+- glossary: array
+- forbidden_words: array of strings
+- required_terms: array of strings
+- claims_policy: object
+- examples: object or null
+
+Input draft values (some may be natural language):
+- positioning: {_to_kb_prompt_text(raw_map['positioning']) or 'null'}
+- glossary: {_to_kb_prompt_text(raw_map['glossary']) or 'null'}
+- forbidden_words: {_to_kb_prompt_text(raw_map['forbidden_words']) or 'null'}
+- required_terms: {_to_kb_prompt_text(raw_map['required_terms']) or 'null'}
+- claims_policy: {_to_kb_prompt_text(raw_map['claims_policy']) or 'null'}
+- examples: {_to_kb_prompt_text(raw_map['examples']) or 'null'}
+
+Return ONLY valid JSON.
+""".strip()
+        llm_output = invoke(
+            {
+                "prompt": prompt,
+                "tool_args": {
+                    "model_id": DEFAULT_MODEL_ID,
+                    "ui_language": "en",
+                },
+            }
+        )
+        if "error" not in llm_output:
+            parsed = _extract_first_json_object(str(llm_output.get("result", "")))
+            if isinstance(parsed, dict):
+                for key in raw_map:
+                    if key in parsed:
+                        parsed_map[key] = parsed[key]
+
+    positioning_obj = parsed_map["positioning"] if isinstance(parsed_map["positioning"], dict) else {}
+    glossary_list = _to_list(parsed_map["glossary"])
+    forbidden_list = _normalize_string_list(_to_list(parsed_map["forbidden_words"]))
+    required_list = _normalize_string_list(_to_list(parsed_map["required_terms"]))
+    claims_obj = parsed_map["claims_policy"] if isinstance(parsed_map["claims_policy"], dict) else {}
+    examples_value = parsed_map["examples"]
+    if examples_value is not None and not isinstance(examples_value, (dict, list, str, int, float, bool)):
+        examples_value = None
+
+    return {
+        "positioning": positioning_obj,
+        "glossary": glossary_list,
+        "forbidden_words": forbidden_list,
+        "required_terms": required_list,
+        "claims_policy": claims_obj,
+        "examples": examples_value,
+    }
+
+
 def _kb_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "kb_key": row["kb_key"],
@@ -449,12 +615,12 @@ class BrandKBInput(BaseModel):
     kb_key: str = Field(min_length=1, max_length=80)
     kb_name: str | None = Field(default=None, max_length=120)
     brand_voice: str | None = Field(default=None, max_length=500)
-    positioning: dict[str, Any] = Field(default_factory=dict)
-    glossary: list[Any] = Field(default_factory=list)
-    forbidden_words: list[Any] = Field(default_factory=list)
-    required_terms: list[Any] = Field(default_factory=list)
-    claims_policy: dict[str, Any] = Field(default_factory=dict)
-    examples: dict[str, Any] | None = None
+    positioning: Any = Field(default_factory=dict)
+    glossary: Any = Field(default_factory=list)
+    forbidden_words: Any = Field(default_factory=list)
+    required_terms: Any = Field(default_factory=list)
+    claims_policy: Any = Field(default_factory=dict)
+    examples: Any | None = None
     notes: str | None = Field(default=None, max_length=4000)
 
 
@@ -470,12 +636,12 @@ class ConversationModeInput(BaseModel):
 class BrandKBUpdateInput(BaseModel):
     kb_name: str | None = Field(default=None, max_length=120)
     brand_voice: str | None = Field(default=None, max_length=500)
-    positioning: dict[str, Any] = Field(default_factory=dict)
-    glossary: list[Any] = Field(default_factory=list)
-    forbidden_words: list[Any] = Field(default_factory=list)
-    required_terms: list[Any] = Field(default_factory=list)
-    claims_policy: dict[str, Any] = Field(default_factory=dict)
-    examples: dict[str, Any] | None = None
+    positioning: Any = Field(default_factory=dict)
+    glossary: Any = Field(default_factory=list)
+    forbidden_words: Any = Field(default_factory=list)
+    required_terms: Any = Field(default_factory=list)
+    claims_policy: Any = Field(default_factory=dict)
+    examples: Any | None = None
     notes: str | None = Field(default=None, max_length=4000)
 
 
@@ -2019,27 +2185,27 @@ KB_HTML = """
             <input id="kb-brand-voice" />
           </div>
           <div class="full">
-            <label for="kb-positioning" data-i18n="positioning">Positioning (JSON)</label>
+            <label for="kb-positioning" data-i18n="positioning">Positioning (JSON or natural language)</label>
             <textarea id="kb-positioning">{}</textarea>
           </div>
           <div class="full">
-            <label for="kb-glossary" data-i18n="glossary">Glossary (JSON Array)</label>
+            <label for="kb-glossary" data-i18n="glossary">Glossary (JSON array or natural language)</label>
             <textarea id="kb-glossary">[]</textarea>
           </div>
           <div class="full">
-            <label for="kb-forbidden" data-i18n="forbidden">Forbidden Words (JSON Array)</label>
+            <label for="kb-forbidden" data-i18n="forbidden">Forbidden Words (JSON array or natural language)</label>
             <textarea id="kb-forbidden">[]</textarea>
           </div>
           <div class="full">
-            <label for="kb-required" data-i18n="required">Required Terms (JSON Array)</label>
+            <label for="kb-required" data-i18n="required">Required Terms (JSON array or natural language)</label>
             <textarea id="kb-required">[]</textarea>
           </div>
           <div class="full">
-            <label for="kb-claims" data-i18n="claims">Claims Policy (JSON)</label>
+            <label for="kb-claims" data-i18n="claims">Claims Policy (JSON or natural language)</label>
             <textarea id="kb-claims">{}</textarea>
           </div>
           <div class="full">
-            <label for="kb-examples" data-i18n="examples">Examples (JSON / null)</label>
+            <label for="kb-examples" data-i18n="examples">Examples (JSON / natural language / null)</label>
             <textarea id="kb-examples">null</textarea>
           </div>
           <div class="full">
@@ -2068,12 +2234,12 @@ const I18N = {
     new_key: '新版本目标 Key（可新建）',
     kb_name: 'KB 名称',
     brand_voice: '品牌语调',
-    positioning: '定位 (JSON)',
-    glossary: '术语表 (JSON 数组)',
-    forbidden: '禁用词 (JSON 数组)',
-    required: '必需词 (JSON 数组)',
-    claims: '声明策略 (JSON)',
-    examples: '示例 (JSON / null)',
+    positioning: '定位（JSON 或自然语言）',
+    glossary: '术语表（JSON 数组或自然语言）',
+    forbidden: '禁用词（JSON 数组或自然语言）',
+    required: '必需词（JSON 数组或自然语言）',
+    claims: '声明策略（JSON 或自然语言）',
+    examples: '示例（JSON / 自然语言 / null）',
     notes: '备注',
     create_version: '创建新版本',
     update_version: '更新当前版本',
@@ -2098,12 +2264,12 @@ const I18N = {
     new_key: 'Target key for new version',
     kb_name: 'KB Name',
     brand_voice: 'Brand Voice',
-    positioning: 'Positioning (JSON)',
-    glossary: 'Glossary (JSON Array)',
-    forbidden: 'Forbidden Words (JSON Array)',
-    required: 'Required Terms (JSON Array)',
-    claims: 'Claims Policy (JSON)',
-    examples: 'Examples (JSON / null)',
+    positioning: 'Positioning (JSON or natural language)',
+    glossary: 'Glossary (JSON array or natural language)',
+    forbidden: 'Forbidden Words (JSON array or natural language)',
+    required: 'Required Terms (JSON array or natural language)',
+    claims: 'Claims Policy (JSON or natural language)',
+    examples: 'Examples (JSON / natural language / null)',
     notes: 'Notes',
     create_version: 'Create New Version',
     update_version: 'Update Current Version',
@@ -2155,7 +2321,11 @@ async function api(url, options={}) {
 function parseJSON(raw, fallback) {
   const text = (raw || '').trim();
   if (!text) return fallback;
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return text;
+  }
 }
 function stringify(value) {
   if (value === null || value === undefined) return 'null';
@@ -2821,8 +2991,14 @@ def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
     kb_name = (body.kb_name or kb_key).strip() or kb_key
     brand_voice = body.brand_voice.strip() if body.brand_voice else None
     notes = body.notes.strip() if body.notes else None
-    forbidden_words = _normalize_string_list(body.forbidden_words)
-    required_terms = _normalize_string_list(body.required_terms)
+    normalized = _normalize_kb_structured_fields_with_llm(
+        positioning=body.positioning,
+        glossary=body.glossary,
+        forbidden_words=body.forbidden_words,
+        required_terms=body.required_terms,
+        claims_policy=body.claims_policy,
+        examples=body.examples,
+    )
     now = now_utc().isoformat()
 
     with db_conn() as conn:
@@ -2843,12 +3019,12 @@ def create_brand_kb(body: BrandKBInput, request: Request) -> Any:
                 kb_name[:120],
                 version,
                 brand_voice,
-                _json_dumps(body.positioning),
-                _json_dumps(body.glossary),
-                _json_dumps(forbidden_words),
-                _json_dumps(required_terms),
-                _json_dumps(body.claims_policy),
-                _json_dumps(body.examples) if body.examples is not None else None,
+                _json_dumps(normalized["positioning"]),
+                _json_dumps(normalized["glossary"]),
+                _json_dumps(normalized["forbidden_words"]),
+                _json_dumps(normalized["required_terms"]),
+                _json_dumps(normalized["claims_policy"]),
+                _json_dumps(normalized["examples"]) if normalized["examples"] is not None else None,
                 notes,
                 now,
             ),
@@ -2872,8 +3048,14 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
     kb_name = (body.kb_name or key).strip() or key
     brand_voice = body.brand_voice.strip() if body.brand_voice else None
     notes = body.notes.strip() if body.notes else None
-    forbidden_words = _normalize_string_list(body.forbidden_words)
-    required_terms = _normalize_string_list(body.required_terms)
+    normalized = _normalize_kb_structured_fields_with_llm(
+        positioning=body.positioning,
+        glossary=body.glossary,
+        forbidden_words=body.forbidden_words,
+        required_terms=body.required_terms,
+        claims_policy=body.claims_policy,
+        examples=body.examples,
+    )
 
     with db_conn() as conn:
         exists = conn.execute(
@@ -2893,12 +3075,12 @@ def update_brand_kb(kb_key: str, version: int, body: BrandKBUpdateInput, request
             (
                 kb_name[:120],
                 brand_voice,
-                _json_dumps(body.positioning),
-                _json_dumps(body.glossary),
-                _json_dumps(forbidden_words),
-                _json_dumps(required_terms),
-                _json_dumps(body.claims_policy),
-                _json_dumps(body.examples) if body.examples is not None else None,
+                _json_dumps(normalized["positioning"]),
+                _json_dumps(normalized["glossary"]),
+                _json_dumps(normalized["forbidden_words"]),
+                _json_dumps(normalized["required_terms"]),
+                _json_dumps(normalized["claims_policy"]),
+                _json_dumps(normalized["examples"]) if normalized["examples"] is not None else None,
                 notes,
                 key,
                 version,
