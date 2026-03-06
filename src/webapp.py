@@ -23,12 +23,13 @@ from pydantic import BaseModel, Field
 from model.load import DEFAULT_MODEL_ID
 
 
-def _load_invoke() -> Any:
+def _load_runtime_functions() -> tuple[Any, Any | None]:
     try:
         from main import invoke as runtime_invoke
+        from main import invoke_stream as runtime_invoke_stream
 
         if callable(runtime_invoke):
-            return runtime_invoke
+            return runtime_invoke, runtime_invoke_stream if callable(runtime_invoke_stream) else None
     except Exception:
         pass
 
@@ -41,10 +42,11 @@ def _load_invoke() -> Any:
     runtime_invoke = getattr(module, "invoke", None)
     if not callable(runtime_invoke):
         raise RuntimeError("`invoke` function was not found in src/main.py")
-    return runtime_invoke
+    runtime_invoke_stream = getattr(module, "invoke_stream", None)
+    return runtime_invoke, runtime_invoke_stream if callable(runtime_invoke_stream) else None
 
 
-invoke = _load_invoke()
+invoke, invoke_stream = _load_runtime_functions()
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -3172,7 +3174,7 @@ async function api(url, options={}) {
 }
 
 function parseSseBlock(block) {
-  const lines = block.split('\n');
+  const lines = block.split('\\n');
   let event = 'message';
   const dataParts = [];
   for (const line of lines) {
@@ -3186,9 +3188,9 @@ function parseSseBlock(block) {
     }
   }
   let data = {};
-  const raw = dataParts.join('\n');
+  const raw = dataParts.join('\\n');
   if (raw) {
-    try { data = JSON.parse(raw); } catch { data = {raw}; }
+    try { data = JSON.parse(raw); } catch (_) { data = {raw}; }
   }
   return {event, data};
 }
@@ -3222,8 +3224,8 @@ async function streamMessage(url, payload, onDelta) {
   if (!res.ok) {
     let data = {};
     let rawText = '';
-    try { data = await res.json(); } catch {
-      try { rawText = await res.text(); } catch {}
+    try { data = await res.json(); } catch (_) {
+      try { rawText = await res.text(); } catch (_) {}
     }
     const detail = (data && typeof data.detail === 'string' && data.detail.trim())
       ? data.detail.trim()
@@ -3248,7 +3250,7 @@ async function streamMessage(url, payload, onDelta) {
     const {done, value} = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, {stream: true});
-    const blocks = buffer.split('\n\n');
+    const blocks = buffer.split('\\n\\n');
     buffer = blocks.pop() || '';
     for (const block of blocks) {
       const parsed = parseSseBlock(block);
@@ -3269,6 +3271,52 @@ async function streamMessage(url, payload, onDelta) {
   return finalMessage;
 }
 
+function createStreamRenderer(node, box) {
+  let renderedText = '';
+  let pendingText = '';
+  let running = false;
+  let finished = false;
+  let resolveDone = null;
+  const donePromise = new Promise((resolve) => { resolveDone = resolve; });
+
+  async function flush() {
+    if (running) return;
+    running = true;
+    while (pendingText.length) {
+      const step = Math.min(24, Math.max(4, Math.ceil(pendingText.length * 0.18)));
+      renderedText += pendingText.slice(0, step);
+      pendingText = pendingText.slice(step);
+      setMessageContent(node, renderedText);
+      box.scrollTop = box.scrollHeight;
+      await new Promise((resolve) => setTimeout(resolve, 18));
+    }
+    running = false;
+    if (finished && resolveDone) {
+      resolveDone(renderedText);
+    }
+  }
+
+  return {
+    push(deltaText) {
+      if (!deltaText) return;
+      pendingText += String(deltaText);
+      flush();
+    },
+    async finish(finalText='') {
+      const knownLength = renderedText.length + pendingText.length;
+      if (finalText && finalText.length > knownLength) {
+        pendingText += finalText.slice(knownLength);
+        flush();
+      }
+      finished = true;
+      if (!running && !pendingText.length && resolveDone) {
+        resolveDone(renderedText);
+      }
+      return donePromise;
+    }
+  };
+}
+
 async function loadCsrfToken() {
   const res = await fetch('/api/csrf');
   if (!res.ok) throw new Error('csrf');
@@ -3277,7 +3325,7 @@ async function loadCsrfToken() {
 }
 
 function fmt(ts) {
-  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+  try { return new Date(ts).toLocaleString(); } catch (_) { return ts; }
 }
 
 function listText(items) {
@@ -4446,6 +4494,7 @@ async function sendMessage() {
   setMessageContent(pendingBot, t('thinking'));
   box.appendChild(pendingBot);
   box.scrollTop = box.scrollHeight;
+  const renderer = createStreamRenderer(pendingBot, box);
 
   try {
     const active = currentConversation();
@@ -4460,16 +4509,31 @@ async function sendMessage() {
       payload.extra_requirements = document.getElementById('brief-extra').value.trim() || null;
       payload.output_sections = selectedOutputSections();
     }
-    let streamedText = '';
-    const assistantMessage = await streamMessage(`/api/conversations/${activeConversationId}/messages/stream`, payload, (delta) => {
-      streamedText += delta;
-      setMessageContent(pendingBot, streamedText);
-      box.scrollTop = box.scrollHeight;
-    });
-    if (!streamedText && assistantMessage && typeof assistantMessage.content === 'string') {
-      streamedText = assistantMessage.content;
+    let finalText = '';
+    let streamSucceeded = false;
+    if (typeof ReadableStream !== 'undefined') {
+      try {
+        const assistantMessage = await streamMessage(`/api/conversations/${activeConversationId}/messages/stream`, payload, (delta) => {
+          renderer.push(delta);
+        });
+        if (assistantMessage && typeof assistantMessage.content === 'string') {
+          finalText = assistantMessage.content;
+        }
+        streamSucceeded = true;
+      } catch (streamErr) {
+        console.warn('stream failed, fallback to non-stream mode:', streamErr);
+      }
     }
-    setMessageContent(pendingBot, streamedText || t('request_failed'));
+    if (!streamSucceeded) {
+      const data = await api(`/api/conversations/${activeConversationId}/messages`, {
+        method:'POST',
+        body: JSON.stringify(payload)
+      });
+      finalText = data && data.assistant_message ? (data.assistant_message.content || '') : '';
+      renderer.push(finalText);
+    }
+    const rendered = await renderer.finish(finalText || '');
+    setMessageContent(pendingBot, rendered || finalText || t('request_failed'));
     const refreshedItems = await api(`/api/conversations/${activeConversationId}/messages`);
     renderMessages(refreshedItems);
     await loadOrchestratorRuns(activeConversationId);
@@ -4997,7 +5061,7 @@ async function api(url, options={}) {
   }
   const res = await fetch(url, {headers, ...options});
   let data = {};
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch (_) {}
   if (!res.ok) {
     const err = new Error(data.detail || 'Request failed');
     err.status = res.status;
@@ -5009,7 +5073,7 @@ async function loadCsrfToken() {
   const res = await fetch('/api/csrf');
   if (!res.ok) {
     let data = {};
-    try { data = await res.json(); } catch {}
+    try { data = await res.json(); } catch (_) {}
     const err = new Error(data.detail || 'csrf');
     err.status = res.status;
     throw err;
@@ -5252,7 +5316,7 @@ function gotoExperiments() { location.href = '/experiments'; }
     me = await api('/api/me');
     await loadMyGroups();
     await refreshKBList();
-  } catch {
+  } catch (_) {
     location.href = '/';
   }
 })();
@@ -5482,7 +5546,7 @@ async function api(url, options={}) {
   }
   const res = await fetch(url, {headers, credentials:'same-origin', ...options});
   let data = {};
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch (_) {}
   if (!res.ok) {
     const err = new Error(data.detail || t('request_failed'));
     err.status = res.status;
@@ -5494,7 +5558,7 @@ async function loadCsrfToken() {
   const res = await fetch('/api/csrf', {credentials:'same-origin'});
   if (!res.ok) {
     let data = {};
-    try { data = await res.json(); } catch {}
+    try { data = await res.json(); } catch (_) {}
     const err = new Error(data.detail || 'csrf');
     err.status = res.status;
     throw err;
@@ -6149,7 +6213,7 @@ async function api(url, options={}) {
   }
   const res = await fetch(url, {headers, ...options});
   let data = {};
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch (_) {}
   if (!res.ok) throw new Error(data.detail || t('request_failed'));
   return data;
 }
@@ -6161,7 +6225,7 @@ async function loadCsrfToken() {
 }
 
 function fmt(ts) {
-  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+  try { return new Date(ts).toLocaleString(); } catch (_) { return ts; }
 }
 
 async function loadUsers() {
@@ -6220,7 +6284,7 @@ function gotoExperiments() { location.href = '/experiments'; }
   try {
     await loadCsrfToken();
     await loadUsers();
-  } catch {
+  } catch (_) {
     location.href = '/app';
   }
 })();
@@ -6686,7 +6750,7 @@ function statusLabel(status) {
 }
 
 function fmt(ts) {
-  try { return new Date(ts).toLocaleString(); } catch { return ts || ''; }
+  try { return new Date(ts).toLocaleString(); } catch (_) { return ts || ''; }
 }
 
 function parseJsonObject(text, fallback={}) {
@@ -6700,7 +6764,7 @@ function parseJsonObject(text, fallback={}) {
 }
 
 function pretty(value) {
-  try { return JSON.stringify(value || {}, null, 2); } catch { return '{}'; }
+  try { return JSON.stringify(value || {}, null, 2); } catch (_) { return '{}'; }
 }
 
 function setLang(lang) {
@@ -6728,7 +6792,7 @@ async function api(url, options={}) {
   }
   const res = await fetch(url, {headers, ...options});
   let data = {};
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch (_) {}
   if (!res.ok) {
     const err = new Error(data.detail || t('request_failed'));
     err.status = res.status;
@@ -6741,7 +6805,7 @@ async function loadCsrfToken() {
   const res = await fetch('/api/csrf');
   if (!res.ok) {
     let data = {};
-    try { data = await res.json(); } catch {}
+    try { data = await res.json(); } catch (_) {}
     const err = new Error(data.detail || 'csrf');
     err.status = res.status;
     throw err;
@@ -7031,7 +7095,7 @@ function gotoAdmin() { location.href = '/admin'; }
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> Any:
-    return HTMLResponse(AUTH_HTML)
+    return _html_response(AUTH_HTML)
 
 
 @app.post("/register")
@@ -7133,28 +7197,28 @@ def logout(request: Request) -> Any:
 def app_page(request: Request) -> Any:
     if not current_user(request):
         return RedirectResponse(url="/", status_code=302)
-    return HTMLResponse(APP_HTML)
+    return _html_response(APP_HTML)
 
 
 @app.get("/kb", response_class=HTMLResponse)
 def kb_page(request: Request) -> Any:
     if not current_user(request):
         return RedirectResponse(url="/", status_code=302)
-    return HTMLResponse(KB_HTML)
+    return _html_response(KB_HTML)
 
 
 @app.get("/groups", response_class=HTMLResponse)
 def groups_page(request: Request) -> Any:
     if not current_user(request):
         return RedirectResponse(url="/", status_code=302)
-    return HTMLResponse(GROUPS_HTML)
+    return _html_response(GROUPS_HTML)
 
 
 @app.get("/experiments", response_class=HTMLResponse)
 def experiments_page(request: Request) -> Any:
     if not current_user(request):
         return RedirectResponse(url="/", status_code=302)
-    return HTMLResponse(EXPERIMENTS_HTML)
+    return _html_response(EXPERIMENTS_HTML)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -7164,7 +7228,7 @@ def admin_page(request: Request) -> Any:
         return RedirectResponse(url="/", status_code=302)
     if user["is_admin"] == 0:
         return RedirectResponse(url="/app", status_code=302)
-    return HTMLResponse(ADMIN_HTML)
+    return _html_response(ADMIN_HTML)
 
 
 @app.get("/api/me")
@@ -8585,10 +8649,15 @@ def _run_agent_with_model_fallback(
     context: dict[str, Any],
     original_model_id: str,
     ui_language: str | None,
+    on_delta: Any = None,
 ) -> dict[str, Any]:
     is_en = _ui_is_english(ui_language)
     model_fallback_used = False
-    agent_output = invoke({"prompt": content, "tool_args": context})
+    use_stream = on_delta is not None and callable(invoke_stream)
+    if use_stream:
+        agent_output = invoke_stream({"prompt": content, "tool_args": context}, on_delta=on_delta)
+    else:
+        agent_output = invoke({"prompt": content, "tool_args": context})
     assistant_text = ""
 
     if "error" in agent_output and original_model_id != DEFAULT_MODEL_ID:
@@ -8704,6 +8773,14 @@ def _chunk_text(text: str, *, size: int = 96) -> list[str]:
     return [clean[i : i + size] for i in range(0, len(clean), size)]
 
 
+def _html_response(content: str) -> HTMLResponse:
+    response = HTMLResponse(content)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 @app.post("/api/conversations/{conversation_id}/messages")
 def send_message(conversation_id: int, body: MessageInput, request: Request) -> Any:
     user = must_login(request)
@@ -8767,7 +8844,11 @@ def send_message_stream(conversation_id: int, body: MessageInput, request: Reque
         user_message_id = user_cur.lastrowid
 
     context = _build_message_context(conversation_id, conversation, body, content)
-    result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
+    result_queue: Queue[tuple[str, Any]] = Queue()
+
+    def emit_delta(text: str) -> None:
+        if text:
+            result_queue.put(("delta", text))
 
     def worker() -> None:
         try:
@@ -8776,6 +8857,7 @@ def send_message_stream(conversation_id: int, body: MessageInput, request: Reque
                 context=context,
                 original_model_id=conversation["model_id"],
                 ui_language=body.ui_language,
+                on_delta=emit_delta,
             )
             result_queue.put(("ok", runtime_result))
         except Exception as exc:  # pragma: no cover - fallback protection for stream path
@@ -8791,6 +8873,9 @@ def send_message_stream(conversation_id: int, body: MessageInput, request: Reque
         while True:
             try:
                 status, payload = result_queue.get(timeout=0.35)
+                if status == "delta":
+                    yield _sse_event("delta", {"text": str(payload)})
+                    continue
                 if status == "ok":
                     runtime_result = payload
                 else:
@@ -8814,9 +8899,6 @@ def send_message_stream(conversation_id: int, body: MessageInput, request: Reque
             resolved_model_id=runtime_result["resolved_model_id"],
         )
 
-        for chunk in _chunk_text(runtime_result["assistant_text"]):
-            yield _sse_event("delta", {"text": chunk})
-            time.sleep(0.01)
         yield _sse_event(
             "done",
             {

@@ -54,6 +54,60 @@ def test_invoke_without_structured_context_uses_general_prompt(monkeypatch):
     assert "Assume the product and campaign are primarily designed for US-centered customers." in captured["prompt"]
 
 
+def test_invoke_stream_chat_emits_deltas(monkeypatch):
+    deltas = []
+    captured = {}
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: object())
+
+    def fake_stream(_agent, prompt: str, on_delta=None):
+        captured["prompt"] = prompt
+        if callable(on_delta):
+            on_delta("hello ")
+            on_delta("world")
+        return "hello world"
+
+    monkeypatch.setattr(main, "_stream_agent_text", fake_stream)
+
+    result = main.invoke_stream({"prompt": "help me"}, on_delta=deltas.append)
+
+    assert result == {"result": "hello world"}
+    assert deltas == ["hello ", "world"]
+    assert "The user is asking for help related to marketing." in captured["prompt"]
+
+
+def test_invoke_stream_marketing_generator_mode_streams(monkeypatch):
+    deltas = []
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: object())
+    captured = {}
+
+    def fake_stream(_agent, prompt: str, on_delta=None):
+        captured["prompt"] = prompt
+        if callable(on_delta):
+            on_delta("streamed-copy")
+        return "streamed-copy"
+
+    monkeypatch.setattr(main, "_stream_agent_text", fake_stream)
+
+    result = main.invoke_stream(
+        {
+            "prompt": "generate",
+            "tool_args": {
+                "channel": "email",
+                "product": "Acme AI",
+                "audience": "B2B marketers",
+                "objective": "leads",
+                "output_sections": ["generator"],
+            },
+        },
+        on_delta=deltas.append,
+    )
+
+    assert result["result"] == "streamed-copy"
+    assert deltas == ["streamed-copy"]
+    assert "Campaign inputs:" in captured["prompt"]
+
+
 def test_invoke_chat_mode_includes_context_block(monkeypatch):
     captured = {}
 

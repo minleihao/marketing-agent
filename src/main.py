@@ -1,7 +1,8 @@
 import json
 import os
 import re
-from typing import Any, Dict
+import asyncio
+from typing import Any, Callable, Dict
 
 from dotenv import load_dotenv
 from strands import Agent
@@ -253,6 +254,31 @@ def _extract_message_text(result: Any) -> str:
         return "\n".join(chunks).strip()
 
     return ""
+
+
+def _stream_agent_text(agent: Agent, prompt: str, on_delta: Callable[[str], None] | None = None) -> str:
+    async def _runner() -> str:
+        chunks: list[str] = []
+        final_from_result = ""
+        async for event in agent.stream_async(prompt):
+            if not isinstance(event, dict):
+                continue
+            delta = event.get("data")
+            if isinstance(delta, str) and delta:
+                chunks.append(delta)
+                if on_delta:
+                    on_delta(delta)
+            if not final_from_result and "result" in event:
+                final_from_result = _extract_message_text(event.get("result"))
+        if chunks:
+            return "".join(chunks).strip()
+        return final_from_result.strip()
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_runner())
+    finally:
+        loop.close()
 
 
 def _extract_json_candidate(text: str) -> str:
@@ -637,6 +663,8 @@ def _run_marketing_orchestration(
     brand_voice: str,
     extra: str,
     language_rules: str,
+    stream_generator: bool = False,
+    on_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     brief_prompt = brief_normalizer_prompt(
         user_prompt=user_prompt,
@@ -668,16 +696,19 @@ def _run_marketing_orchestration(
     )
     plan = _normalize_planner_json(_safe_json_loads(planner_text, {}), brief=brief)
 
-    generated_output = _extract_message_text(
-        agent(
-            generator_prompt(
-                normalized_brief_json=json.dumps(brief, ensure_ascii=False),
-                planner_json=json.dumps(plan, ensure_ascii=False),
-                user_prompt=user_prompt,
-                language_rules=language_rules,
-            )
-        )
+    generator_stage_prompt = generator_prompt(
+        normalized_brief_json=json.dumps(brief, ensure_ascii=False),
+        planner_json=json.dumps(plan, ensure_ascii=False),
+        user_prompt=user_prompt,
+        language_rules=language_rules,
     )
+    if stream_generator:
+        generated_output = _stream_agent_text(agent, generator_stage_prompt, on_delta=on_delta)
+    else:
+        generated_output = _extract_message_text(
+            agent(generator_stage_prompt)
+        )
+    
     if not generated_output:
         raise RuntimeError("Generator stage produced empty output.")
 
@@ -843,6 +874,162 @@ def invoke(payload: Dict[str, Any]):
                     objective=objective,
                     brand_voice=brand_voice,
                 ),
+                "meta": {
+                    "mode": "local_fallback",
+                    "reason": "missing_aws_credentials",
+                },
+            }
+        return _error_response(
+            "INFERENCE_ERROR",
+            "Failed to generate a response from the model.",
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+def invoke_stream(payload: Dict[str, Any], on_delta: Callable[[str], None] | None = None):
+    try:
+        payload_dict = _validate_payload(payload)
+        user_prompt = _ensure_string(payload_dict.get("prompt", ""), "prompt")
+        marketing_context = _get_marketing_context(payload_dict)
+
+        raw_channels = marketing_context.get("channels")
+        channel = _ensure_string(marketing_context.get("channel"), "channel")
+        channels = _normalize_channel_selection(channel, raw_channels)
+        if channels:
+            channel = channels[0]
+        product = _ensure_string(marketing_context.get("product"), "product")
+        audience = _ensure_string(marketing_context.get("audience"), "audience")
+        objective = _ensure_string(marketing_context.get("objective"), "objective")
+        brand_voice = _ensure_string(
+            marketing_context.get("brand_voice"),
+            "brand_voice",
+            default=DEFAULT_BRAND_VOICE,
+        )
+        ui_language = _ensure_string(marketing_context.get("ui_language"), "ui_language", default="").lower()
+        extra = _ensure_string(marketing_context.get("extra_requirements"), "extra_requirements")
+        model_id = _ensure_string(marketing_context.get("model_id"), "model_id", default=DEFAULT_MODEL_ID)
+        thinking_depth = _ensure_string(marketing_context.get("thinking_depth"), "thinking_depth", default="low")
+        model_id = _normalize_model_id(model_id)
+        thinking_depth = _normalize_thinking_depth(thinking_depth)
+        include_trace = bool(marketing_context.get("include_trace", False))
+        output_sections = _normalize_output_sections(marketing_context.get("output_sections"))
+
+        if raw_channels is not None and channels:
+            invalid_channels = [item for item in channels if item not in VALID_CHANNELS]
+            if invalid_channels:
+                valid = ", ".join(sorted(VALID_CHANNELS))
+                raise ValueError(
+                    f"`channels` contains unsupported value(s): {', '.join(invalid_channels)}. Allowed: {valid}."
+                )
+        elif channel and channel.lower() not in VALID_CHANNELS:
+            valid = ", ".join(sorted(VALID_CHANNELS))
+            raise ValueError(f"`channel` must be one of: {valid}.")
+        if not _is_allowed_model_id(model_id):
+            raise ValueError(f"`model_id` is not allowed: {model_id}")
+
+        channel_label = ", ".join(channels) if channels else channel
+        has_structured_context = any([channel_label, product, audience, objective])
+        if not user_prompt and not has_structured_context:
+            raise ValueError("Either `prompt` or at least one marketing field is required.")
+
+    except ValueError as exc:
+        return _error_response("VALIDATION_ERROR", str(exc))
+
+    try:
+        language_rules = language_instruction(ui_language)
+        max_tokens = _max_tokens_for_thinking_depth(thinking_depth)
+        if max_tokens == DEFAULT_MAX_TOKENS:
+            agent = _get_agent(model_id)
+        else:
+            agent = _get_agent_with_max_tokens(model_id, max_tokens)
+        orchestrator_payload: dict[str, Any] | None = None
+
+        if has_structured_context:
+            if ORCHESTRATOR_ENABLED:
+                stream_generator = output_sections == ["generator"] and on_delta is not None
+                if stream_generator:
+                    # Fast stream path: bypass multi-stage orchestration for immediate token streaming.
+                    final_prompt = marketing_prompt(
+                        user_prompt=user_prompt,
+                        channel=channel_label,
+                        product=product,
+                        audience=audience,
+                        objective=objective,
+                        brand_voice=brand_voice,
+                        extra=extra,
+                        language_rules=language_rules,
+                    )
+                    message = _stream_agent_text(agent, final_prompt, on_delta=on_delta)
+                else:
+                    orchestrator_payload = _run_marketing_orchestration(
+                        agent=agent,
+                        user_prompt=user_prompt,
+                        channel=channel_label,
+                        channels=channels,
+                        product=product,
+                        audience=audience,
+                        objective=objective,
+                        brand_voice=brand_voice,
+                        extra=extra,
+                        language_rules=language_rules,
+                        stream_generator=False,
+                        on_delta=None,
+                    )
+                    message = _compose_orchestrator_message(orchestrator_payload, output_sections)
+            else:
+                final_prompt = marketing_prompt(
+                    user_prompt=user_prompt,
+                    channel=channel_label,
+                    product=product,
+                    audience=audience,
+                    objective=objective,
+                    brand_voice=brand_voice,
+                    extra=extra,
+                    language_rules=language_rules,
+                )
+                if on_delta:
+                    message = _stream_agent_text(agent, final_prompt, on_delta=on_delta)
+                else:
+                    result = agent(final_prompt)
+                    message = _extract_message_text(result)
+        else:
+            final_prompt = chat_prompt(
+                user_prompt=user_prompt,
+                language_rules=language_rules,
+                context_block=extra,
+            )
+            if on_delta:
+                message = _stream_agent_text(agent, final_prompt, on_delta=on_delta)
+            else:
+                result = agent(final_prompt)
+                message = _extract_message_text(result)
+
+        if not message:
+            raise RuntimeError("Agent returned an invalid response payload.")
+
+        output: Dict[str, Any] = {"result": message}
+        if include_trace and orchestrator_payload:
+            output["orchestrator"] = {
+                "brief": orchestrator_payload.get("brief"),
+                "plan": orchestrator_payload.get("plan"),
+                "evaluation": orchestrator_payload.get("evaluation"),
+            }
+        return output
+
+    except Exception as exc:
+        if _is_credentials_error(exc):
+            fallback = _local_fallback_response(
+                user_prompt=user_prompt,
+                channel=channel_label,
+                product=product,
+                audience=audience,
+                objective=objective,
+                brand_voice=brand_voice,
+            )
+            if on_delta and fallback:
+                on_delta(fallback)
+            return {
+                "result": fallback,
                 "meta": {
                     "mode": "local_fallback",
                     "reason": "missing_aws_credentials",

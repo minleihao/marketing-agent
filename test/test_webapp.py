@@ -173,6 +173,15 @@ def test_send_message_passes_thinking_depth_to_runtime(webapp_module):
 def test_stream_message_endpoint_returns_sse(webapp_module):
     webapp_module.invoke = lambda _payload: {"result": "streamed assistant reply"}
 
+    def fake_stream(payload, on_delta=None):
+        if callable(on_delta):
+            on_delta("streamed ")
+            on_delta("assistant ")
+            on_delta("reply")
+        return {"result": "streamed assistant reply"}
+
+    webapp_module.invoke_stream = fake_stream
+
     with TestClient(webapp_module.app) as client:
         headers = _register(client, "stream_user")
         conv_res = client.post(
