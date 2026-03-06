@@ -59,27 +59,20 @@ THINKING_DEPTH_MULTIPLIERS = {
 }
 ORCHESTRATOR_ENABLED = os.getenv("NOVARED_ORCHESTRATOR_ENABLED", "1").strip() not in {"0", "false", "False"}
 
-_agent_cache: dict[str, Agent] = {}
-_agent_profile_cache: dict[tuple[str, int], Agent] = {}
-
-
 def _get_agent(model_id: str) -> Agent:
-    if model_id not in _agent_cache:
-        _agent_cache[model_id] = Agent(
-            model=load_model(model_id=model_id),
-            system_prompt=SYSTEM_PROMPT,
-        )
-    return _agent_cache[model_id]
+    # Do not share Agent instances across requests.
+    # Strands Agent objects are not safe for concurrent reuse in runtime workers.
+    return Agent(
+        model=load_model(model_id=model_id),
+        system_prompt=SYSTEM_PROMPT,
+    )
 
 
 def _get_agent_with_max_tokens(model_id: str, max_tokens: int) -> Agent:
-    cache_key = (model_id, max_tokens)
-    if cache_key not in _agent_profile_cache:
-        _agent_profile_cache[cache_key] = Agent(
-            model=load_model(model_id=model_id, max_tokens=max_tokens),
-            system_prompt=SYSTEM_PROMPT,
-        )
-    return _agent_profile_cache[cache_key]
+    return Agent(
+        model=load_model(model_id=model_id, max_tokens=max_tokens),
+        system_prompt=SYSTEM_PROMPT,
+    )
 
 
 def _normalize_thinking_depth(raw_depth: str) -> str:
@@ -816,19 +809,35 @@ def invoke(payload: Dict[str, Any]):
 
         if has_structured_context:
             if ORCHESTRATOR_ENABLED:
-                orchestrator_payload = _run_marketing_orchestration(
-                    agent=agent,
-                    user_prompt=user_prompt,
-                    channel=channel_label,
-                    channels=channels,
-                    product=product,
-                    audience=audience,
-                    objective=objective,
-                    brand_voice=brand_voice,
-                    extra=extra,
-                    language_rules=language_rules,
-                )
-                message = _compose_orchestrator_message(orchestrator_payload, output_sections)
+                # Fast path for default marketing generation:
+                # skip multi-stage orchestration when only generator output is requested.
+                if output_sections == ["generator"] and not include_trace:
+                    final_prompt = marketing_prompt(
+                        user_prompt=user_prompt,
+                        channel=channel_label,
+                        product=product,
+                        audience=audience,
+                        objective=objective,
+                        brand_voice=brand_voice,
+                        extra=extra,
+                        language_rules=language_rules,
+                    )
+                    result = agent(final_prompt)
+                    message = _extract_message_text(result)
+                else:
+                    orchestrator_payload = _run_marketing_orchestration(
+                        agent=agent,
+                        user_prompt=user_prompt,
+                        channel=channel_label,
+                        channels=channels,
+                        product=product,
+                        audience=audience,
+                        objective=objective,
+                        brand_voice=brand_voice,
+                        extra=extra,
+                        language_rules=language_rules,
+                    )
+                    message = _compose_orchestrator_message(orchestrator_payload, output_sections)
             else:
                 final_prompt = marketing_prompt(
                     user_prompt=user_prompt,
