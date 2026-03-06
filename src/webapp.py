@@ -6,11 +6,14 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
+import time
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -51,6 +54,8 @@ else:
     DATA_DIR = Path(os.getenv("NOVARED_DATA_DIR", str(DEFAULT_DATA_DIR)))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "webapp.db"
+DB_S3_URI = os.getenv("NOVARED_DB_S3_URI", "").strip()
+DB_S3_PULL_INTERVAL_SECONDS = max(0.0, float(os.getenv("NOVARED_DB_S3_PULL_INTERVAL_SECONDS", "1.5")))
 SESSION_COOKIE = "nova_session"
 SESSION_DAYS = 7
 MAX_DOC_SIZE_BYTES = 3 * 1024 * 1024
@@ -84,14 +89,115 @@ ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE = os.getenv("NOVARED_ENFORCE_DEFAULT_ADMIN
 }
 
 
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    text = (uri or "").strip()
+    if not text:
+        return "", ""
+    if not text.startswith("s3://"):
+        raise RuntimeError("NOVARED_DB_S3_URI must start with s3://")
+    without_scheme = text[5:]
+    parts = without_scheme.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise RuntimeError("NOVARED_DB_S3_URI must be in format s3://bucket/key")
+    return parts[0], parts[1]
+
+
+DB_S3_BUCKET, DB_S3_KEY = _parse_s3_uri(DB_S3_URI)
+_DB_S3_CLIENT: Any | None = None
+_DB_S3_LOCK = threading.Lock()
+_DB_LAST_ETAG: str | None = None
+_DB_LAST_PULL_AT = 0.0
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def db_conn() -> sqlite3.Connection:
+def _db_s3_enabled() -> bool:
+    return bool(DB_S3_BUCKET and DB_S3_KEY)
+
+
+def _s3_client() -> Any:
+    global _DB_S3_CLIENT
+    if _DB_S3_CLIENT is None:
+        import boto3
+
+        _DB_S3_CLIENT = boto3.client("s3")
+    return _DB_S3_CLIENT
+
+
+def _pull_db_from_s3(*, force: bool = False) -> None:
+    if not _db_s3_enabled():
+        return
+    global _DB_LAST_ETAG, _DB_LAST_PULL_AT
+    now_ts = time.time()
+    if not force and DB_PATH.exists() and now_ts - _DB_LAST_PULL_AT < DB_S3_PULL_INTERVAL_SECONDS:
+        return
+    with _DB_S3_LOCK:
+        now_ts = time.time()
+        if not force and DB_PATH.exists() and now_ts - _DB_LAST_PULL_AT < DB_S3_PULL_INTERVAL_SECONDS:
+            return
+        try:
+            head = _s3_client().head_object(Bucket=DB_S3_BUCKET, Key=DB_S3_KEY)
+        except Exception as exc:  # pragma: no cover - network/env dependent
+            code = (
+                getattr(exc, "response", {}).get("Error", {}).get("Code")
+                if hasattr(exc, "response")
+                else None
+            )
+            if code not in {"404", "NoSuchKey", "NotFound"}:
+                print(f"[db-sync] failed to head s3 object: {exc}")
+            _DB_LAST_PULL_AT = now_ts
+            return
+        remote_etag = str(head.get("ETag", "")).strip('"')
+        if DB_PATH.exists() and remote_etag and remote_etag == _DB_LAST_ETAG:
+            _DB_LAST_PULL_AT = now_ts
+            return
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = DB_PATH.with_suffix(".download")
+        try:
+            _s3_client().download_file(DB_S3_BUCKET, DB_S3_KEY, str(tmp_path))
+            os.replace(tmp_path, DB_PATH)
+            _DB_LAST_ETAG = remote_etag or _DB_LAST_ETAG
+            _DB_LAST_PULL_AT = now_ts
+        except Exception as exc:  # pragma: no cover - network/env dependent
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            print(f"[db-sync] failed to download s3 database: {exc}")
+
+
+def _push_db_to_s3() -> None:
+    if not _db_s3_enabled() or not DB_PATH.exists():
+        return
+    global _DB_LAST_ETAG, _DB_LAST_PULL_AT
+    with _DB_S3_LOCK:
+        try:
+            with DB_PATH.open("rb") as f:
+                response = _s3_client().put_object(Bucket=DB_S3_BUCKET, Key=DB_S3_KEY, Body=f)
+            etag = str(response.get("ETag", "")).strip('"')
+            if etag:
+                _DB_LAST_ETAG = etag
+            _DB_LAST_PULL_AT = time.time()
+        except Exception as exc:  # pragma: no cover - network/env dependent
+            print(f"[db-sync] failed to upload s3 database: {exc}")
+
+
+@contextmanager
+def db_conn() -> Iterator[sqlite3.Connection]:
+    _pull_db_from_s3()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        has_writes = conn.total_changes > 0
+        conn.close()
+        if has_writes:
+            _push_db_to_s3()
 
 
 def hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
@@ -108,6 +214,7 @@ def verify_password(password: str, salt_hex: str, password_hash: str) -> bool:
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    _pull_db_from_s3(force=True)
     with db_conn() as conn:
         conn.executescript(
             """
@@ -4696,7 +4803,7 @@ async function loadCsrfToken() {
 }
 function isAuthError(err) {
   const status = err && typeof err === 'object' ? err.status : null;
-  return status === 401 || status === 403;
+  return status === 401;
 }
 function setInitError(message) {
   const msg = document.getElementById('create-msg');
@@ -4958,6 +5065,8 @@ GROUPS_HTML = """
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
     input, select, button { padding:8px 10px; border:1px solid #d6dfec; border-radius:10px; background:#fff; }
     button { cursor:pointer; font-weight:600; }
+    button.danger { border-color:#fecaca; color:#b91c1c; background:#fff5f5; }
+    button.danger:hover { background:#fee2e2; }
     .list { display:flex; flex-direction:column; gap:8px; max-height:260px; overflow:auto; }
     .item { border:1px solid #d6dfec; border-radius:10px; padding:8px; }
     .meta { font-size:12px; color:#5b6b80; margin-top:4px; }
@@ -5027,11 +5136,11 @@ GROUPS_HTML = """
         <div id="requests" class="list"></div>
         <div class="row" style="margin-top:10px">
           <input id="invite-username" data-i18n-placeholder="invite_user" placeholder="邀请用户名" />
-          <button onclick="inviteUser()" data-i18n="invite">邀请</button>
+          <button id="invite-btn" onclick="inviteUser()" data-i18n="invite">邀请</button>
         </div>
         <div class="row">
           <input id="transfer-user-id" data-i18n-placeholder="transfer_user_id" placeholder="新管理员 user_id" />
-          <button onclick="transferAdmin()" data-i18n="transfer_admin">转移管理员</button>
+          <button id="transfer-btn" onclick="transferAdmin()" data-i18n="transfer_admin">转移管理员</button>
         </div>
         <div id="manage-msg" class="small"></div>
       </div>
@@ -5060,6 +5169,8 @@ const I18N = {
     transfer_user_id: '新管理员 user_id',
     transfer_admin: '转移管理员',
     join: '申请加入',
+    leave_group: '退出组',
+    delete_group: '解散组',
     approve: '批准',
     reject: '拒绝',
     accept: '接受',
@@ -5070,7 +5181,16 @@ const I18N = {
     pending: '待审批',
     invited: '已邀请',
     save_ok: '操作成功',
-    save_fail: '操作失败'
+    save_fail: '操作失败',
+    request_failed: '请求失败',
+    name_too_short: '组名称至少需要 2 个字符',
+    auth_expired: '登录已过期，请重新登录',
+    not_approved: '当前组成员资格未批准，暂不可查看详情',
+    admin_only: '仅组管理员可查看审批请求并执行管理操作',
+    confirm_leave_group: '确认退出这个组吗？',
+    confirm_delete_group: '确认解散这个组吗？该组共享内容会转为私有。',
+    left_group: '已退出组',
+    deleted_group: '组已解散'
   },
   en: {
     title: 'Group Management',
@@ -5092,6 +5212,8 @@ const I18N = {
     transfer_user_id: 'New admin user_id',
     transfer_admin: 'Transfer Admin',
     join: 'Request Join',
+    leave_group: 'Leave Group',
+    delete_group: 'Delete Group',
     approve: 'Approve',
     reject: 'Reject',
     accept: 'Accept',
@@ -5102,7 +5224,16 @@ const I18N = {
     pending: 'Pending',
     invited: 'Invited',
     save_ok: 'Operation succeeded',
-    save_fail: 'Operation failed'
+    save_fail: 'Operation failed',
+    request_failed: 'Request failed',
+    name_too_short: 'Group name must be at least 2 characters',
+    auth_expired: 'Your session expired. Please sign in again.',
+    not_approved: 'Your membership is not approved yet. Group details are unavailable.',
+    admin_only: 'Only group admins can review requests and run management actions.',
+    confirm_leave_group: 'Leave this group?',
+    confirm_delete_group: 'Delete this group? Shared content under this group will become private.',
+    left_group: 'You left the group.',
+    deleted_group: 'Group deleted.'
   }
 };
 
@@ -5133,17 +5264,46 @@ async function api(url, options={}) {
   if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
     headers['X-CSRF-Token'] = csrfToken;
   }
-  const res = await fetch(url, {headers, ...options});
+  const res = await fetch(url, {headers, credentials:'same-origin', ...options});
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error(data.detail || 'Request failed');
+  if (!res.ok) {
+    const err = new Error(data.detail || t('request_failed'));
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 async function loadCsrfToken() {
-  const res = await fetch('/api/csrf');
-  if (!res.ok) throw new Error('csrf');
+  const res = await fetch('/api/csrf', {credentials:'same-origin'});
+  if (!res.ok) {
+    let data = {};
+    try { data = await res.json(); } catch {}
+    const err = new Error(data.detail || 'csrf');
+    err.status = res.status;
+    throw err;
+  }
   const data = await res.json();
   csrfToken = data.csrf_token || '';
+}
+function isAuthError(err) {
+  const status = err && typeof err === 'object' ? err.status : null;
+  return status === 401;
+}
+function setInitError(message) {
+  const msg = document.getElementById('create-msg');
+  if (!msg) return;
+  msg.textContent = `${t('save_fail')}: ${message || t('request_failed')}`;
+  msg.className = 'small warn';
+}
+function toggleManageActions(enabled) {
+  const inviteInput = document.getElementById('invite-username');
+  const inviteBtn = document.getElementById('invite-btn');
+  const transferInput = document.getElementById('transfer-user-id');
+  const transferBtn = document.getElementById('transfer-btn');
+  [inviteInput, inviteBtn, transferInput, transferBtn].forEach((el) => {
+    if (el) el.disabled = !enabled;
+  });
 }
 function roleLabel(role) { return role === 'admin' ? t('admin') : t('member'); }
 function statusLabel(status) {
@@ -5152,6 +5312,10 @@ function statusLabel(status) {
   if (status === 'invited') return t('invited');
   return status || '';
 }
+function canDeleteGroup(group) {
+  if (!group || !me) return false;
+  return Boolean(me.is_admin || (group.role === 'admin' && group.status === 'approved'));
+}
 function renderAll() {
   renderMyGroups();
   renderDiscoverGroups();
@@ -5159,21 +5323,40 @@ function renderAll() {
 function renderMyGroups() {
   const box = document.getElementById('my-groups');
   const select = document.getElementById('manage-group-select');
+  const previous = select.value;
   box.innerHTML = '';
   select.innerHTML = '';
   if (!myGroups.length) {
     box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    toggleManageActions(false);
     return;
   }
   for (const g of myGroups) {
     const item = document.createElement('div');
     item.className = 'item';
-    item.innerHTML = `<div><strong>${g.name}</strong> (${g.group_type})</div><div class="meta">${roleLabel(g.role)} · ${statusLabel(g.status)}</div>`;
+    const actions = [];
+    actions.push(`<button onclick="leaveGroup(${g.id})">${t('leave_group')}</button>`);
+    if (canDeleteGroup(g)) {
+      actions.push(`<button class="danger" onclick="deleteGroup(${g.id})">${t('delete_group')}</button>`);
+    }
+    item.innerHTML = `
+      <div><strong>${g.name}</strong> (${g.group_type})</div>
+      <div class="meta">${roleLabel(g.role)} · ${statusLabel(g.status)}</div>
+      <div class="row" style="margin-top:6px">${actions.join('')}</div>
+    `;
     box.appendChild(item);
     const opt = document.createElement('option');
     opt.value = String(g.id);
-    opt.textContent = `${g.name} (${g.group_type})`;
+    opt.textContent = `${g.name} (${g.group_type}) · ${statusLabel(g.status)}`;
     select.appendChild(opt);
+  }
+  if ([...select.options].some((opt) => opt.value === previous)) {
+    select.value = previous;
+    return;
+  }
+  const approved = myGroups.find((g) => g.status === 'approved');
+  if (approved) {
+    select.value = String(approved.id);
   }
 }
 function renderDiscoverGroups() {
@@ -5187,12 +5370,17 @@ function renderDiscoverGroups() {
     const item = document.createElement('div');
     item.className = 'item';
     const status = g.my_status ? statusLabel(g.my_status) : '';
+    const actions = [];
+    if (!g.my_status) {
+      actions.push(`<button onclick="joinGroup(${g.id})">${t('join')}</button>`);
+    }
+    if (me && me.is_admin) {
+      actions.push(`<button class="danger" onclick="deleteGroup(${g.id})">${t('delete_group')}</button>`);
+    }
     item.innerHTML = `
       <div><strong>${g.name}</strong> (${g.group_type})</div>
       <div class="meta">members: ${g.approved_member_count}${status ? ` · ${status}` : ''}</div>
-      <div class="row" style="margin-top:6px">
-        <button onclick="joinGroup(${g.id})">${t('join')}</button>
-      </div>`;
+      <div class="row" style="margin-top:6px">${actions.join('')}</div>`;
     box.appendChild(item);
   }
 }
@@ -5231,12 +5419,25 @@ async function createGroup() {
   const name = document.getElementById('new-group-name').value.trim();
   const group_type = document.getElementById('new-group-type').value;
   const msg = document.getElementById('create-msg');
+  if (name.length < 2) {
+    msg.textContent = t('name_too_short');
+    msg.className = 'small warn';
+    return;
+  }
   try {
+    if (!csrfToken) {
+      await loadCsrfToken();
+    }
     await api('/api/groups', {method:'POST', body: JSON.stringify({name, group_type})});
+    document.getElementById('new-group-name').value = '';
     msg.textContent = t('save_ok');
     msg.className = 'small ok';
     await refreshData();
   } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
     msg.textContent = `${t('save_fail')}: ${e.message}`;
     msg.className = 'small warn';
   }
@@ -5246,33 +5447,105 @@ async function joinGroup(groupId) {
     await api(`/api/groups/${groupId}/join`, {method:'POST'});
     await refreshData();
   } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
     alert(e.message);
   }
 }
+async function leaveGroup(groupId) {
+  if (!confirm(t('confirm_leave_group'))) return;
+  const msg = document.getElementById('create-msg');
+  try {
+    await api(`/api/groups/${groupId}/leave`, {method:'POST'});
+    msg.textContent = t('left_group');
+    msg.className = 'small ok';
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    msg.textContent = `${t('save_fail')}: ${e.message}`;
+    msg.className = 'small warn';
+  }
+}
+async function deleteGroup(groupId) {
+  if (!confirm(t('confirm_delete_group'))) return;
+  const msg = document.getElementById('create-msg');
+  try {
+    await api(`/api/groups/${groupId}`, {method:'DELETE'});
+    msg.textContent = t('deleted_group');
+    msg.className = 'small ok';
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    msg.textContent = `${t('save_fail')}: ${e.message}`;
+    msg.className = 'small warn';
+  }
+}
 async function acceptInvite(groupId) {
-  await api(`/api/groups/${groupId}/invitations/accept`, {method:'POST'});
-  await refreshData();
+  try {
+    await api(`/api/groups/${groupId}/invitations/accept`, {method:'POST'});
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    alert(e.message);
+  }
 }
 async function rejectInvite(groupId) {
-  await api(`/api/groups/${groupId}/invitations/reject`, {method:'POST'});
-  await refreshData();
+  try {
+    await api(`/api/groups/${groupId}/invitations/reject`, {method:'POST'});
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    alert(e.message);
+  }
 }
 async function loadManageGroup() {
   const groupIdRaw = document.getElementById('manage-group-select').value;
   const membersBox = document.getElementById('members');
   const reqBox = document.getElementById('requests');
+  const manageMsg = document.getElementById('manage-msg');
   membersBox.innerHTML = '';
   reqBox.innerHTML = '';
+  manageMsg.textContent = '';
+  manageMsg.className = 'small';
+  toggleManageActions(false);
   if (!groupIdRaw) {
     membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
     reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
     return;
   }
+  const selected = myGroups.find((g) => String(g.id) === String(groupIdRaw));
+  if (!selected || selected.status !== 'approved') {
+    membersBox.innerHTML = `<div class="item small">${t('not_approved')}</div>`;
+    reqBox.innerHTML = `<div class="item small">${t('not_approved')}</div>`;
+    return;
+  }
   const groupId = Number(groupIdRaw);
-  const [members, requests] = await Promise.all([
-    api(`/api/groups/${groupId}/members`),
-    api(`/api/groups/${groupId}/requests`)
-  ]);
+  let members = [];
+  try {
+    members = await api(`/api/groups/${groupId}/members`);
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    membersBox.innerHTML = `<div class="item small warn">${e.message}</div>`;
+    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
   if (!members.length) {
     membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
   } else {
@@ -5282,6 +5555,24 @@ async function loadManageGroup() {
       item.innerHTML = `<div><strong>${m.username}</strong> (#${m.user_id})</div><div class="meta">${roleLabel(m.role)} · ${statusLabel(m.status)}</div>`;
       membersBox.appendChild(item);
     }
+  }
+  if (selected.role !== 'admin') {
+    reqBox.innerHTML = `<div class="item small">${t('admin_only')}</div>`;
+    manageMsg.textContent = t('admin_only');
+    manageMsg.className = 'small';
+    return;
+  }
+  toggleManageActions(true);
+  let requests = [];
+  try {
+    requests = await api(`/api/groups/${groupId}/requests`);
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    reqBox.innerHTML = `<div class="item small warn">${e.message}</div>`;
+    return;
   }
   if (!requests.length) {
     reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
@@ -5301,19 +5592,44 @@ async function loadManageGroup() {
   }
 }
 async function approveRequest(groupId, userId) {
-  await api(`/api/groups/${groupId}/requests/${userId}/approve`, {method:'POST'});
-  await loadManageGroup();
+  try {
+    await api(`/api/groups/${groupId}/requests/${userId}/approve`, {method:'POST'});
+    await loadManageGroup();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    alert(e.message);
+  }
 }
 async function rejectRequest(groupId, userId) {
-  await api(`/api/groups/${groupId}/requests/${userId}/reject`, {method:'POST'});
-  await loadManageGroup();
+  try {
+    await api(`/api/groups/${groupId}/requests/${userId}/reject`, {method:'POST'});
+    await loadManageGroup();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    alert(e.message);
+  }
 }
 async function inviteUser() {
   const groupIdRaw = document.getElementById('manage-group-select').value;
   if (!groupIdRaw) return;
   const username = document.getElementById('invite-username').value.trim();
-  await api(`/api/groups/${groupIdRaw}/invite`, {method:'POST', body: JSON.stringify({username})});
-  await loadManageGroup();
+  try {
+    await api(`/api/groups/${groupIdRaw}/invite`, {method:'POST', body: JSON.stringify({username})});
+    document.getElementById('invite-username').value = '';
+    await loadManageGroup();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    alert(e.message);
+  }
 }
 async function transferAdmin() {
   const groupIdRaw = document.getElementById('manage-group-select').value;
@@ -5330,6 +5646,10 @@ async function transferAdmin() {
     msg.className = 'small ok';
     await refreshData();
   } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
     msg.textContent = `${t('save_fail')}: ${e.message}`;
     msg.className = 'small warn';
   }
@@ -6216,7 +6536,7 @@ async function loadCsrfToken() {
 
 function isAuthError(err) {
   const status = err && typeof err === 'object' ? err.status : null;
-  return status === 401 || status === 403;
+  return status === 401;
 }
 
 function renderConversationSelect() {
@@ -6772,6 +7092,8 @@ def create_group(body: GroupCreateInput, request: Request) -> Any:
     user = must_login(request)
     group_type = _normalize_group_type(body.group_type)
     name = body.name.strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Group name must be at least 2 characters")
     now = now_utc().isoformat()
     with db_conn() as conn:
         try:
@@ -6831,6 +7153,91 @@ def request_group_join(group_id: int, request: Request) -> Any:
             (group_id, user["id"], user["id"], now),
         )
     return {"ok": True, "status": "pending"}
+
+
+@app.post("/api/groups/{group_id}/leave")
+def leave_group(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    with db_conn() as conn:
+        group_row = conn.execute(
+            "SELECT id, name, group_type FROM groups WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+        membership = conn.execute(
+            "SELECT role, status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        ).fetchone()
+        if not membership:
+            raise HTTPException(status_code=404, detail="You are not a member of this group")
+        if membership["role"] == "admin" and membership["status"] == "approved":
+            other_admin_count = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM group_memberships
+                WHERE group_id = ? AND status = 'approved' AND role = 'admin' AND user_id != ?
+                """,
+                (group_id, user["id"]),
+            ).fetchone()["cnt"]
+            if other_admin_count <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot leave group as the last admin. Transfer admin or delete the group.",
+                )
+        conn.execute(
+            "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        )
+    return {"ok": True, "group_id": group_id}
+
+
+@app.delete("/api/groups/{group_id}")
+def delete_group(group_id: int, request: Request) -> Any:
+    user = must_login(request)
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        group_row = conn.execute(
+            "SELECT id, name, group_type FROM groups WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+        if user["is_admin"] == 0:
+            admin_row = conn.execute(
+                """
+                SELECT 1 FROM group_memberships
+                WHERE group_id = ? AND user_id = ? AND status = 'approved' AND role = 'admin'
+                """,
+                (group_id, user["id"]),
+            ).fetchone()
+            if not admin_row:
+                raise HTTPException(status_code=403, detail="Only group admin or system admin can delete this group")
+        detached_conversations = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM conversations WHERE share_group_id = ?",
+            (group_id,),
+        ).fetchone()["cnt"]
+        conn.execute(
+            "UPDATE conversations SET visibility = 'private', share_group_id = NULL, updated_at = ? WHERE share_group_id = ?",
+            (now, group_id),
+        )
+        detached_kbs = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM brand_kb_versions WHERE share_group_id = ?",
+            (group_id,),
+        ).fetchone()["cnt"]
+        conn.execute(
+            "UPDATE brand_kb_versions SET visibility = 'private', share_group_id = NULL WHERE share_group_id = ?",
+            (group_id,),
+        )
+        conn.execute("DELETE FROM group_memberships WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "group_name": group_row["name"],
+        "detached_conversations": detached_conversations,
+        "detached_kb_versions": detached_kbs,
+    }
 
 
 @app.get("/api/groups/{group_id}/members")

@@ -276,3 +276,109 @@ def test_experiment_lifecycle_api(webapp_module):
 
         not_found_res = client.get(f"/api/experiments/{experiment_id}")
         assert not_found_res.status_code == 404
+
+
+def test_create_group_rejects_blank_name_after_trim(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "group_blank_name_user")
+        res = client.post(
+            "/api/groups",
+            json={"name": "   ", "group_type": "task"},
+            headers=headers,
+        )
+        assert res.status_code == 400, res.text
+        assert "Group name must be at least 2 characters" in res.text
+
+
+def test_group_member_can_leave_group(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as member_client:
+        owner_headers = _register(owner_client, "group_owner_user")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Growth Team", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        member_headers = _register(member_client, "group_member_user")
+        member_profile = member_client.get("/api/me")
+        assert member_profile.status_code == 200, member_profile.text
+        member_user_id = member_profile.json()["id"]
+
+        join_res = member_client.post(f"/api/groups/{group_id}/join", headers=member_headers)
+        assert join_res.status_code == 200, join_res.text
+        assert join_res.json()["status"] == "pending"
+
+        approve_res = owner_client.post(
+            f"/api/groups/{group_id}/requests/{member_user_id}/approve",
+            headers=owner_headers,
+        )
+        assert approve_res.status_code == 200, approve_res.text
+
+        leave_res = member_client.post(f"/api/groups/{group_id}/leave", headers=member_headers)
+        assert leave_res.status_code == 200, leave_res.text
+        assert leave_res.json()["ok"] is True
+
+        mine_res = member_client.get("/api/groups/mine")
+        assert mine_res.status_code == 200, mine_res.text
+        assert all(item["id"] != group_id for item in mine_res.json())
+
+
+def test_last_group_admin_cannot_leave_group(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "solo_group_admin_user")
+        create_res = client.post(
+            "/api/groups",
+            json={"name": "Solo Admin Group", "group_type": "company"},
+            headers=headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        leave_res = client.post(f"/api/groups/{group_id}/leave", headers=headers)
+        assert leave_res.status_code == 400, leave_res.text
+        assert "last admin" in leave_res.text
+
+
+def test_group_admin_can_delete_group(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "delete_group_owner")
+        create_res = client.post(
+            "/api/groups",
+            json={"name": "Delete By Owner", "group_type": "task"},
+            headers=headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        delete_res = client.delete(f"/api/groups/{group_id}", headers=headers)
+        assert delete_res.status_code == 200, delete_res.text
+        payload = delete_res.json()
+        assert payload["ok"] is True
+        assert payload["group_id"] == group_id
+
+        groups_res = client.get("/api/groups")
+        assert groups_res.status_code == 200, groups_res.text
+        assert all(item["id"] != group_id for item in groups_res.json())
+
+
+def test_system_admin_can_delete_any_group(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as admin_client:
+        owner_headers = _register(owner_client, "group_owner_for_admin_delete")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Delete By System Admin", "group_type": "company"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        admin_headers = _login_admin(admin_client)
+        delete_res = admin_client.delete(f"/api/groups/{group_id}", headers=admin_headers)
+        assert delete_res.status_code == 200, delete_res.text
+        assert delete_res.json()["ok"] is True
+
+        owner_groups_res = owner_client.get("/api/groups")
+        assert owner_groups_res.status_code == 200, owner_groups_res.text
+        assert all(item["id"] != group_id for item in owner_groups_res.json())
