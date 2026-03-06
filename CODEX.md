@@ -1,86 +1,68 @@
-# CODEX Notes: Marketing Copilot
+# Codex Engineering Notes: Marketing Copilot
 
-## 1) 项目理解
-- 本项目是一个营销智能体 Web 应用（`Marketing Copilot`），已具备：
-- 用户注册/登录/会话管理
-- 多会话聊天（左侧会话列表 + 右侧对话）
-- 营销任务模式（结构化输入字段）
-- Knowledge Base 管理（版本化）
-- 对话文档上传
-- 中英双语界面
-- 基于群组的内容共享与权限控制
+## Product Understanding
+Marketing Copilot is a multi-user marketing assistant platform with two primary work modes:
+- `chat`: general collaborative dialogue
+- `marketing`: structured campaign generation with orchestrated stages
 
-## 2) 运行结构
-- 主要代码集中在 `/Users/minleihao/marketing-agent/novaRed/src/webapp.py`（后端 API + 前端 HTML/JS 模板）。
-- 模型调用链路：
-- Web API -> `/Users/minleihao/marketing-agent/novaRed/src/main.py` 的 `invoke()`
-- 数据存储：
-- 默认 SQLite：`NOVARED_DATA_DIR/webapp.db`（默认 `data/webapp.db`）
-- 可切 PostgreSQL：设置 `NOVARED_DATABASE_URL`（或 `DATABASE_URL`）为 `postgresql://...`
-- 上传文件：`NOVARED_DATA_DIR/uploads/`
+The product includes:
+- account registration/login
+- conversation lifecycle (create, rename, delete, export)
+- group collaboration (`task` and `company` groups)
+- visibility model (`private`, `task`, `company`)
+- shared Knowledge Base with versioning
+- experiment management bound to conversations
+- bilingual UI (`zh` / `en`)
 
-## 3) 权限模型（核心）
-- Chat 与 Knowledge Base 的可见性分为三档：
-- `private`：仅创建者可见
-- `task`：任务组内已批准成员可见
-- `company`：公司组内已批准成员可见
-- 组管理相关：
-- 组类型：`task`、`company`
-- 成员状态：`pending`、`approved`、`invited`
-- 只有 `approved` 成员可访问共享内容
-- 所有权规则：
-- owner 专属操作：会话重命名/删除、模式和模型修改、文档上传删除、Knowledge Base 更新删除
-- 共享成员可读共享会话与 Knowledge Base（当前共享会话也允许发送消息）
+## Runtime Map
+- Main web backend entry: `/Users/minleihao/marketing-agent/novaRed/src/webapp.py`
+- Agent invocation: `/Users/minleihao/marketing-agent/novaRed/src/main.py`
+- DB backend abstraction: `/Users/minleihao/marketing-agent/novaRed/src/db_backend.py`
+- DB schema init and migration-safe setup: `/Users/minleihao/marketing-agent/novaRed/src/db_schema.py`
+- API payload schemas: `/Users/minleihao/marketing-agent/novaRed/src/webapp_schemas.py`
+- UI template constants: `/Users/minleihao/marketing-agent/novaRed/src/webapp_templates.py`
+- SQLite -> PostgreSQL migration tool: `/Users/minleihao/marketing-agent/novaRed/scripts/migrate_sqlite_to_postgres.py`
 
-## 4) 后续开发高风险点
-- 不要绕开权限校验：
-- 读取/发送消息使用 `conversation_visible_or_404()`
-- owner 专属操作使用 `conversation_owner_or_404()`
-- `visibility` 与 `share_group_id` 必须成对校验：`_validate_share_group_for_user()`
-- Knowledge Base 绑定必须做可见性校验：
-- `/api/conversations/{conversation_id}/kb` 只能绑定当前用户有权限访问的 Knowledge Base 版本
-- 组类型必须匹配：
-- `visibility=task` 只能配 task 组
-- `visibility=company` 只能配 company 组
-- 注册入组流程不能破坏：
-- `join_group_ids` 创建 `pending` 申请，需组管理员批准
+## Data Backends
+- Default: SQLite (`data/webapp.db` under `NOVARED_DATA_DIR`)
+- Optional: PostgreSQL via `NOVARED_DATABASE_URL` (or `DATABASE_URL`)
 
-## 5) 数据与迁移注意
-- `init_db()` 负责建表与迁移（SQLite + PostgreSQL 双后端）。
-- 变更 Schema 时务必保持向后兼容：
-- 新字段需要迁移逻辑
-- 不要假设数据库是全新状态
-- 现有 Knowledge Base 的 owner 回填逻辑依赖用户表，改动时要复核。
-- SQLite -> PostgreSQL 可用：
-- `/Users/minleihao/marketing-agent/novaRed/scripts/migrate_sqlite_to_postgres.py`
+When PostgreSQL is enabled, SQL placeholder translation and insert-id handling are routed through `db_backend.py`.
 
-## 6) 前端开发注意
-- 聊天头部控件已优化为紧凑布局：下拉框两列显示，按钮单独一行。
-- Knowledge Base 入口位于左侧 `+ 新对话 / + 营销任务` 下方单独一行；会话级 Knowledge Base 绑定对普通 chat 与 marketing 模式都可用。
-- 所有新增文案必须同步 `zh` / `en` 两套 i18n key。
-- 共享内容应保留来源标识（`Shared from` / `共享自`），避免与自有内容混淆。
+## Security and Permission Invariants
+Do not bypass these checks:
+- Viewer check for shared reads: `conversation_visible_or_404(...)`
+- Owner-only mutations: `conversation_owner_or_404(...)`
+- Visibility/group consistency: `_validate_share_group_for_user(...)`
 
-## 7) 模型与运行时注意
-- 模型白名单来源：`NOVARED_ALLOWED_MODELS`（否则走代码默认列表）。
-- 主模型失败时可能回退到 `DEFAULT_MODEL_ID`。
-- AWS 凭证缺失或 SSO 过期时，运行时可能进入本地 fallback 逻辑。
+Rules that must remain true:
+- `task` visibility must reference an approved `task` group membership
+- `company` visibility must reference an approved `company` group membership
+- KB binding to conversation must verify current user can access that KB version
 
-## 8) 建议开发流程
-- 每次改动后至少执行：
-- `python -m py_compile src/webapp.py`
-- `uv run pytest -q`
-- 做权限联调时建议使用隔离数据目录：
-- `NOVARED_DATA_DIR=$(mktemp -d) uv run ...`
-- 最低回归清单：
-- 注册/登录/管理员操作
-- 建组/申请/审批/邀请/转移管理员
-- Chat 可见性共享与隔离
-- Knowledge Base 可见性共享与隔离
-- 越权请求是否正确返回 `403/404`
+## Collaboration Semantics
+- Shared records and owner records must stay distinguishable in API payloads and UI labels.
+- Group lifecycle includes request, approve/reject, invite accept/reject, leave, and admin transfer.
+- Group deletion authorization:
+  - group admin can delete own group
+  - system admin can delete any group
+  - non-admin users can leave but cannot delete the group
 
-## 9) 结构优化建议
-- `src/webapp.py` 体量较大且混合后端与前端模板，后续建议拆分为：
-- 后端 router/service 层
-- 前端静态资源与模板文件
-- 权限服务层（集中化权限判断）
-- 增加专门的权限自动化测试（chat + Knowledge Base + group 全链路）。
+## Known Sensitive Areas for Refactors
+- `src/webapp.py` still contains many routes and domain helpers; refactor incrementally by feature slice.
+- Keep backward-compatible schema migrations for existing deployments.
+- Preserve SSE streaming behavior and fallback handling in message endpoints.
+- Keep bilingual key parity for every new UI string.
+
+## Recommended Dev Workflow
+1. Make focused refactors with behavior-preserving tests first.
+2. Run compile checks after every structural extraction:
+   - `python -m py_compile src/webapp.py src/db_backend.py src/db_schema.py`
+3. Run targeted regressions:
+   - `uv run pytest -q test/test_main.py test/test_webapp.py`
+4. For permission changes, validate cross-user visibility and forbidden access paths.
+
+## Next Refactor Targets
+- Split `webapp.py` route domains into routers (`auth`, `groups`, `kb`, `conversations`, `experiments`, `admin`).
+- Extract shared permission/service logic to dedicated modules.
+- Continue reducing cross-cutting global helpers in favor of explicit service boundaries.
