@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -465,12 +465,13 @@ def init_db() -> None:
             )
 
 
-app = FastAPI(title="Marketing Copilot Web Chat")
-
-
-@app.on_event("startup")
-def startup() -> None:
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
     init_db()
+    yield
+
+
+app = FastAPI(title="Marketing Copilot Web Chat", lifespan=app_lifespan)
 
 
 def _is_csrf_exempt(request: Request) -> bool:
