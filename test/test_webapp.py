@@ -18,6 +18,8 @@ def webapp_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     data_dir = tmp_path / "nova_data"
     monkeypatch.setenv("NOVARED_DATA_DIR", str(data_dir))
     monkeypatch.setenv("NOVARED_ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE", "0")
+    monkeypatch.delenv("NOVARED_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     if "webapp" in sys.modules:
         del sys.modules["webapp"]
     module = importlib.import_module("webapp")
@@ -58,6 +60,15 @@ def test_csrf_rejects_mutation_without_token(webapp_module):
         res = client.post("/api/conversations", json={"task_mode": "chat"})
         assert res.status_code == 403
         assert "Invalid CSRF token" in res.text
+
+
+def test_translate_qmark_to_postgres_keeps_quoted_question_marks(webapp_module):
+    sql = "SELECT '?' AS literal, \"?\" AS ident FROM users WHERE username = ? AND id = ?"
+    converted = webapp_module._translate_qmark_to_postgres(sql)
+    assert "literal" in converted
+    assert "WHERE username = %s AND id = %s" in converted
+    assert "'?'" in converted
+    assert '"?"' in converted
 
 
 def test_csrf_allows_mutation_with_token(webapp_module):

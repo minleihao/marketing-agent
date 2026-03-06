@@ -57,6 +57,10 @@ else:
     DATA_DIR = Path(os.getenv("NOVARED_DATA_DIR", str(DEFAULT_DATA_DIR)))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "webapp.db"
+DATABASE_URL = os.getenv("NOVARED_DATABASE_URL", os.getenv("DATABASE_URL", "")).strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://") :]
+DB_BACKEND = "postgres" if DATABASE_URL.startswith("postgresql://") else "sqlite"
 DB_S3_URI = os.getenv("NOVARED_DB_S3_URI", "").strip()
 DB_S3_PULL_INTERVAL_SECONDS = max(0.0, float(os.getenv("NOVARED_DB_S3_PULL_INTERVAL_SECONDS", "1.5")))
 SESSION_COOKIE = "nova_session"
@@ -91,6 +95,24 @@ ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE = os.getenv("NOVARED_ENFORCE_DEFAULT_ADMIN
     "True",
 }
 
+_PSYCOPG_CONNECT: Any | None = None
+_PSYCOPG_DICT_ROW: Any | None = None
+DB_INTEGRITY_ERRORS: tuple[type[BaseException], ...] = (sqlite3.IntegrityError,)
+
+if DB_BACKEND == "postgres":
+    try:
+        import psycopg
+        from psycopg.errors import UniqueViolation
+        from psycopg.rows import dict_row
+    except Exception as exc:
+        raise RuntimeError(
+            "PostgreSQL backend requested but psycopg is not installed. "
+            "Install it with `uv add psycopg[binary]`."
+        ) from exc
+    _PSYCOPG_CONNECT = psycopg.connect
+    _PSYCOPG_DICT_ROW = dict_row
+    DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, UniqueViolation)
+
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
     text = (uri or "").strip()
@@ -117,7 +139,7 @@ def now_utc() -> datetime:
 
 
 def _db_s3_enabled() -> bool:
-    return bool(DB_S3_BUCKET and DB_S3_KEY)
+    return DB_BACKEND == "sqlite" and bool(DB_S3_BUCKET and DB_S3_KEY)
 
 
 def _s3_client() -> Any:
@@ -185,11 +207,106 @@ def _push_db_to_s3() -> None:
             print(f"[db-sync] failed to upload s3 database: {exc}")
 
 
+def _translate_qmark_to_postgres(sql: str) -> str:
+    if "?" not in sql:
+        return sql
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'" and not in_double:
+            out.append(ch)
+            if in_single and i + 1 < len(sql) and sql[i + 1] == "'":
+                out.append("'")
+                i += 2
+                continue
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "?" and not in_single and not in_double:
+            out.append("%s")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+_WRITE_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP", "TRUNCATE", "REPLACE")
+
+
+def _is_write_statement(sql: str) -> bool:
+    stripped = sql.lstrip()
+    if not stripped:
+        return False
+    first = stripped.split(None, 1)[0].upper()
+    return first in _WRITE_SQL_PREFIXES
+
+
+class PostgresConnectionAdapter:
+    def __init__(self, conn: Any):
+        self._conn = conn
+        self.total_changes = 0
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] | None = None) -> Any:
+        pg_sql = _translate_qmark_to_postgres(sql)
+        bound = tuple(params) if params is not None else ()
+        cur = self._conn.execute(pg_sql, bound)
+        if _is_write_statement(pg_sql):
+            self.total_changes += max(0, int(getattr(cur, "rowcount", 0) or 0))
+        return cur
+
+    def executemany(self, sql: str, seq_of_params: Any) -> Any:
+        pg_sql = _translate_qmark_to_postgres(sql)
+        rows = list(seq_of_params)
+        if not rows:
+            return None
+        cur = self._conn.executemany(pg_sql, rows)
+        if _is_write_statement(pg_sql):
+            self.total_changes += len(rows)
+        return cur
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _insert_and_get_id(conn: Any, sql: str, params: tuple[Any, ...] | list[Any] | None = None) -> int:
+    bound = tuple(params) if params is not None else ()
+    if DB_BACKEND == "postgres":
+        clean_sql = sql.strip().rstrip(";")
+        row = conn.execute(f"{clean_sql} RETURNING id", bound).fetchone()
+        if not row:
+            raise RuntimeError("Failed to fetch inserted id from PostgreSQL")
+        return int(row["id"])
+    cur = conn.execute(sql, bound)
+    return int(cur.lastrowid)
+
+
 @contextmanager
-def db_conn() -> Iterator[sqlite3.Connection]:
-    _pull_db_from_s3()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def db_conn() -> Iterator[Any]:
+    if DB_BACKEND == "postgres":
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL is required when DB_BACKEND=postgres")
+        if _PSYCOPG_CONNECT is None or _PSYCOPG_DICT_ROW is None:
+            raise RuntimeError("psycopg driver is not initialized")
+        raw_conn = _PSYCOPG_CONNECT(DATABASE_URL, row_factory=_PSYCOPG_DICT_ROW)
+        conn: Any = PostgresConnectionAdapter(raw_conn)
+    else:
+        _pull_db_from_s3()
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
     try:
         yield conn
         conn.commit()
@@ -199,7 +316,7 @@ def db_conn() -> Iterator[sqlite3.Connection]:
     finally:
         has_writes = conn.total_changes > 0
         conn.close()
-        if has_writes:
+        if has_writes and DB_BACKEND == "sqlite":
             _push_db_to_s3()
 
 
@@ -214,258 +331,460 @@ def verify_password(password: str, salt_hex: str, password_hash: str) -> bool:
     return hmac.compare_digest(candidate, password_hash)
 
 
+def _escape_sql_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _seed_admin_user(conn: Any) -> None:
+    admin_exists = conn.execute(
+        "SELECT id, password_salt, password_hash FROM users WHERE username = ?",
+        (DEFAULT_ADMIN_USER,),
+    ).fetchone()
+    if not admin_exists:
+        salt, pwd_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        conn.execute(
+            """
+            INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, must_change_password, created_at)
+            VALUES (?, ?, ?, 1, 1, ?, ?)
+            """,
+            (
+                DEFAULT_ADMIN_USER,
+                salt,
+                pwd_hash,
+                1 if (ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE and DEFAULT_ADMIN_PASSWORD == "admin123456") else 0,
+                now_utc().isoformat(),
+            ),
+        )
+    elif verify_password(DEFAULT_ADMIN_PASSWORD, admin_exists["password_salt"], admin_exists["password_hash"]):
+        conn.execute(
+            "UPDATE users SET must_change_password = ? WHERE id = ?",
+            (1 if ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE else 0, admin_exists["id"]),
+        )
+    elif not ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE:
+        conn.execute(
+            "UPDATE users SET must_change_password = 0 WHERE id = ?",
+            (admin_exists["id"],),
+        )
+
+
+def _create_common_indexes(conn: Any) -> None:
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_conversation_id ON documents(conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_chunks_conversation_id ON document_chunks(conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time ON login_attempts(username, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time ON login_attempts(ip_address, created_at)")
+
+
+def _init_db_sqlite(conn: Any) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            csrf_token TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            model_id TEXT NOT NULL DEFAULT 'us.anthropic.claude-sonnet-4-6',
+            task_mode TEXT NOT NULL DEFAULT 'chat',
+            thinking_depth TEXT NOT NULL DEFAULT 'low',
+            visibility TEXT NOT NULL DEFAULT 'private',
+            share_group_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            content_type TEXT,
+            file_path TEXT NOT NULL,
+            text_content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            conversation_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(document_id) REFERENCES documents(id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS brand_kb_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kb_key TEXT NOT NULL,
+            kb_name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            owner_id INTEGER,
+            visibility TEXT NOT NULL DEFAULT 'private',
+            share_group_id INTEGER,
+            brand_voice TEXT,
+            positioning_json TEXT NOT NULL DEFAULT '{}',
+            glossary_json TEXT NOT NULL DEFAULT '[]',
+            forbidden_words_json TEXT NOT NULL DEFAULT '[]',
+            required_terms_json TEXT NOT NULL DEFAULT '[]',
+            claims_policy_json TEXT NOT NULL DEFAULT '{}',
+            examples_json TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(kb_key, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            group_type TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(name, group_type),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_memberships (
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            status TEXT NOT NULL DEFAULT 'pending',
+            requested_by INTEGER,
+            created_at TEXT NOT NULL,
+            approved_at TEXT,
+            PRIMARY KEY(group_id, user_id),
+            FOREIGN KEY(group_id) REFERENCES groups(id),
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(requested_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_memories (
+            conversation_id INTEGER PRIMARY KEY,
+            summary TEXT NOT NULL,
+            source_message_id INTEGER,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS orchestrator_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            request_message_id INTEGER,
+            response_message_id INTEGER,
+            model_id TEXT NOT NULL,
+            brief_json TEXT,
+            plan_json TEXT,
+            evaluation_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            ip_address TEXT,
+            success INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS experiments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_user_id INTEGER NOT NULL,
+            conversation_id INTEGER,
+            title TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_user_id) REFERENCES users(id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS experiment_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id INTEGER NOT NULL,
+            variant_key TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES experiments(id),
+            UNIQUE(experiment_id, variant_key)
+        );
+        """
+    )
+
+    conversation_cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+    if "model_id" not in conversation_cols:
+        conn.execute(f"ALTER TABLE conversations ADD COLUMN model_id TEXT NOT NULL DEFAULT '{DEFAULT_MODEL_ID}'")
+    if "kb_key" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN kb_key TEXT")
+    if "kb_version" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN kb_version INTEGER")
+    if "task_mode" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'chat'")
+    if "thinking_depth" not in conversation_cols:
+        conn.execute(
+            f"ALTER TABLE conversations ADD COLUMN thinking_depth TEXT NOT NULL DEFAULT '{DEFAULT_THINKING_DEPTH}'"
+        )
+    if "visibility" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+    if "share_group_id" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN share_group_id INTEGER")
+
+    user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "must_change_password" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+
+    session_cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "csrf_token" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
+
+    kb_cols = {row["name"] for row in conn.execute("PRAGMA table_info(brand_kb_versions)").fetchall()}
+    if "owner_id" not in kb_cols:
+        conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN owner_id INTEGER")
+        conn.execute("UPDATE brand_kb_versions SET owner_id = 1 WHERE owner_id IS NULL")
+    if "visibility" not in kb_cols:
+        conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+    if "share_group_id" not in kb_cols:
+        conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN share_group_id INTEGER")
+
+    _create_common_indexes(conn)
+
+
+def _init_db_postgres(conn: Any) -> None:
+    schema_statements = [
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id),
+            token TEXT UNIQUE NOT NULL,
+            csrf_token TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS conversations (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id),
+            title TEXT NOT NULL,
+            model_id TEXT NOT NULL DEFAULT 'us.anthropic.claude-sonnet-4-6',
+            task_mode TEXT NOT NULL DEFAULT 'chat',
+            thinking_depth TEXT NOT NULL DEFAULT 'low',
+            visibility TEXT NOT NULL DEFAULT 'private',
+            share_group_id BIGINT,
+            kb_key TEXT,
+            kb_version INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS documents (
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+            filename TEXT NOT NULL,
+            content_type TEXT,
+            file_path TEXT NOT NULL,
+            text_content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id BIGSERIAL PRIMARY KEY,
+            document_id BIGINT NOT NULL REFERENCES documents(id),
+            conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+            chunk_index INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS brand_kb_versions (
+            id BIGSERIAL PRIMARY KEY,
+            kb_key TEXT NOT NULL,
+            kb_name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            owner_id BIGINT,
+            visibility TEXT NOT NULL DEFAULT 'private',
+            share_group_id BIGINT,
+            brand_voice TEXT,
+            positioning_json TEXT NOT NULL DEFAULT '{}',
+            glossary_json TEXT NOT NULL DEFAULT '[]',
+            forbidden_words_json TEXT NOT NULL DEFAULT '[]',
+            required_terms_json TEXT NOT NULL DEFAULT '[]',
+            claims_policy_json TEXT NOT NULL DEFAULT '{}',
+            examples_json TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(kb_key, version)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            group_type TEXT NOT NULL,
+            created_by BIGINT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            UNIQUE(name, group_type)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS group_memberships (
+            group_id BIGINT NOT NULL REFERENCES groups(id),
+            user_id BIGINT NOT NULL REFERENCES users(id),
+            role TEXT NOT NULL DEFAULT 'member',
+            status TEXT NOT NULL DEFAULT 'pending',
+            requested_by BIGINT REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            approved_at TEXT,
+            PRIMARY KEY(group_id, user_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS conversation_memories (
+            conversation_id BIGINT PRIMARY KEY REFERENCES conversations(id),
+            summary TEXT NOT NULL,
+            source_message_id BIGINT,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestrator_runs (
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+            request_message_id BIGINT,
+            response_message_id BIGINT,
+            model_id TEXT NOT NULL,
+            brief_json TEXT,
+            plan_json TEXT,
+            evaluation_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT,
+            ip_address TEXT,
+            success INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS experiments (
+            id BIGSERIAL PRIMARY KEY,
+            owner_user_id BIGINT NOT NULL REFERENCES users(id),
+            conversation_id BIGINT REFERENCES conversations(id),
+            title TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS experiment_variants (
+            id BIGSERIAL PRIMARY KEY,
+            experiment_id BIGINT NOT NULL REFERENCES experiments(id),
+            variant_key TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(experiment_id, variant_key)
+        )
+        """,
+    ]
+    for stmt in schema_statements:
+        conn.execute(stmt)
+
+    escaped_model = _escape_sql_literal(DEFAULT_MODEL_ID)
+    escaped_depth = _escape_sql_literal(DEFAULT_THINKING_DEPTH)
+    conn.execute(f"ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_id TEXT NOT NULL DEFAULT '{escaped_model}'")
+    conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS kb_key TEXT")
+    conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS kb_version INTEGER")
+    conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS task_mode TEXT NOT NULL DEFAULT 'chat'")
+    conn.execute(
+        f"ALTER TABLE conversations ADD COLUMN IF NOT EXISTS thinking_depth TEXT NOT NULL DEFAULT '{escaped_depth}'"
+    )
+    conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'")
+    conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS share_group_id BIGINT")
+    conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT")
+    conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN IF NOT EXISTS owner_id BIGINT")
+    conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'")
+    conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN IF NOT EXISTS share_group_id BIGINT")
+    conn.execute("UPDATE brand_kb_versions SET owner_id = 1 WHERE owner_id IS NULL")
+
+    _create_common_indexes(conn)
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    _pull_db_from_s3(force=True)
+    if DB_BACKEND == "sqlite":
+        _pull_db_from_s3(force=True)
     with db_conn() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                is_admin INTEGER NOT NULL DEFAULT 0,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                must_change_password INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token TEXT UNIQUE NOT NULL,
-                csrf_token TEXT,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                model_id TEXT NOT NULL DEFAULT 'us.anthropic.claude-sonnet-4-6',
-                task_mode TEXT NOT NULL DEFAULT 'chat',
-                thinking_depth TEXT NOT NULL DEFAULT 'low',
-                visibility TEXT NOT NULL DEFAULT 'private',
-                share_group_id INTEGER,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                content_type TEXT,
-                file_path TEXT NOT NULL,
-                text_content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS document_chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id INTEGER NOT NULL,
-                conversation_id INTEGER NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                chunk_text TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(document_id) REFERENCES documents(id),
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS brand_kb_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kb_key TEXT NOT NULL,
-                kb_name TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                owner_id INTEGER,
-                visibility TEXT NOT NULL DEFAULT 'private',
-                share_group_id INTEGER,
-                brand_voice TEXT,
-                positioning_json TEXT NOT NULL DEFAULT '{}',
-                glossary_json TEXT NOT NULL DEFAULT '[]',
-                forbidden_words_json TEXT NOT NULL DEFAULT '[]',
-                required_terms_json TEXT NOT NULL DEFAULT '[]',
-                claims_policy_json TEXT NOT NULL DEFAULT '{}',
-                examples_json TEXT,
-                notes TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE(kb_key, version)
-            );
-
-            CREATE TABLE IF NOT EXISTS groups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                group_type TEXT NOT NULL,
-                created_by INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(name, group_type),
-                FOREIGN KEY(created_by) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS group_memberships (
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                role TEXT NOT NULL DEFAULT 'member',
-                status TEXT NOT NULL DEFAULT 'pending',
-                requested_by INTEGER,
-                created_at TEXT NOT NULL,
-                approved_at TEXT,
-                PRIMARY KEY(group_id, user_id),
-                FOREIGN KEY(group_id) REFERENCES groups(id),
-                FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(requested_by) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS conversation_memories (
-                conversation_id INTEGER PRIMARY KEY,
-                summary TEXT NOT NULL,
-                source_message_id INTEGER,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS orchestrator_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                request_message_id INTEGER,
-                response_message_id INTEGER,
-                model_id TEXT NOT NULL,
-                brief_json TEXT,
-                plan_json TEXT,
-                evaluation_json TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS login_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT,
-                ip_address TEXT,
-                success INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS experiments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner_user_id INTEGER NOT NULL,
-                conversation_id INTEGER,
-                title TEXT NOT NULL,
-                hypothesis TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'draft',
-                traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
-                result_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(owner_user_id) REFERENCES users(id),
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS experiment_variants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                experiment_id INTEGER NOT NULL,
-                variant_key TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(experiment_id) REFERENCES experiments(id),
-                UNIQUE(experiment_id, variant_key)
-            );
-            """
-        )
-
-        conversation_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
-        }
-        if "model_id" not in conversation_cols:
-            conn.execute(
-                f"ALTER TABLE conversations ADD COLUMN model_id TEXT NOT NULL DEFAULT '{DEFAULT_MODEL_ID}'"
-            )
-        if "kb_key" not in conversation_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN kb_key TEXT")
-        if "kb_version" not in conversation_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN kb_version INTEGER")
-        if "task_mode" not in conversation_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'chat'")
-        if "thinking_depth" not in conversation_cols:
-            conn.execute(
-                f"ALTER TABLE conversations ADD COLUMN thinking_depth TEXT NOT NULL DEFAULT '{DEFAULT_THINKING_DEPTH}'"
-            )
-        if "visibility" not in conversation_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
-        if "share_group_id" not in conversation_cols:
-            conn.execute("ALTER TABLE conversations ADD COLUMN share_group_id INTEGER")
-
-        user_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if "must_change_password" not in user_cols:
-            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
-
-        session_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
-        }
-        if "csrf_token" not in session_cols:
-            conn.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
-
-        kb_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(brand_kb_versions)").fetchall()
-        }
-        if "owner_id" not in kb_cols:
-            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN owner_id INTEGER")
-            conn.execute("UPDATE brand_kb_versions SET owner_id = 1 WHERE owner_id IS NULL")
-        if "visibility" not in kb_cols:
-            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
-        if "share_group_id" not in kb_cols:
-            conn.execute("ALTER TABLE brand_kb_versions ADD COLUMN share_group_id INTEGER")
-
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_conversation_id ON documents(conversation_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_document_chunks_conversation_id ON document_chunks(conversation_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_username_time ON login_attempts(username, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time ON login_attempts(ip_address, created_at)")
-
-        admin_exists = conn.execute(
-            "SELECT id, password_salt, password_hash FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)
-        ).fetchone()
-        if not admin_exists:
-            salt, pwd_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
-            conn.execute(
-                """
-                INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, must_change_password, created_at)
-                VALUES (?, ?, ?, 1, 1, ?, ?)
-                """,
-                (
-                    DEFAULT_ADMIN_USER,
-                    salt,
-                    pwd_hash,
-                    1 if (ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE and DEFAULT_ADMIN_PASSWORD == "admin123456") else 0,
-                    now_utc().isoformat(),
-                ),
-            )
-        elif verify_password(DEFAULT_ADMIN_PASSWORD, admin_exists["password_salt"], admin_exists["password_hash"]):
-            conn.execute(
-                "UPDATE users SET must_change_password = ? WHERE id = ?",
-                (1 if ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE else 0, admin_exists["id"]),
-            )
-        elif not ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE:
-            conn.execute(
-                "UPDATE users SET must_change_password = 0 WHERE id = ?",
-                (admin_exists["id"],),
-            )
+        if DB_BACKEND == "postgres":
+            _init_db_postgres(conn)
+        else:
+            _init_db_sqlite(conn)
+        _seed_admin_user(conn)
 
 
 @asynccontextmanager
@@ -7134,7 +7453,7 @@ def register(body: RegisterInput) -> Any:
                     """,
                     [(gid, user_id, user_id, created_at) for gid in requested_group_ids],
                 )
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         raise HTTPException(status_code=400, detail="用户名已存在")
 
     token, exp, csrf_token = create_session(user_id)
@@ -7280,12 +7599,12 @@ def list_public_groups() -> Any:
                        WHERE x.group_id = g.id AND x.status = 'approved'
                    ) AS approved_member_count
             FROM groups g
-            ORDER BY
-                CASE g.group_type
-                    WHEN 'company' THEN 0
-                    ELSE 1
-                END,
-                g.name COLLATE NOCASE ASC
+                ORDER BY
+                    CASE g.group_type
+                        WHEN 'company' THEN 0
+                        ELSE 1
+                    END,
+                    LOWER(g.name) ASC
             """
         ).fetchall()
     return [dict(row) for row in rows]
@@ -7310,7 +7629,7 @@ def list_groups(request: Request, group_type: str | None = None) -> Any:
                 FROM groups g
                 LEFT JOIN group_memberships gm ON gm.group_id = g.id AND gm.user_id = ?
                 WHERE g.group_type = ?
-                ORDER BY g.name COLLATE NOCASE ASC
+                ORDER BY LOWER(g.name) ASC
                 """,
                 (user["id"], normalized_type),
             ).fetchall()
@@ -7325,7 +7644,7 @@ def list_groups(request: Request, group_type: str | None = None) -> Any:
                        ) AS approved_member_count
                 FROM groups g
                 LEFT JOIN group_memberships gm ON gm.group_id = g.id AND gm.user_id = ?
-                ORDER BY g.group_type ASC, g.name COLLATE NOCASE ASC
+                ORDER BY g.group_type ASC, LOWER(g.name) ASC
                 """,
                 (user["id"],),
             ).fetchall()
@@ -7342,7 +7661,7 @@ def list_my_groups(request: Request) -> Any:
             FROM group_memberships gm
             JOIN groups g ON g.id = gm.group_id
             WHERE gm.user_id = ? AND gm.status = 'approved'
-            ORDER BY g.group_type ASC, g.name COLLATE NOCASE ASC
+            ORDER BY g.group_type ASC, LOWER(g.name) ASC
             """,
             (user["id"],),
         ).fetchall()
@@ -7377,13 +7696,13 @@ def create_group(body: GroupCreateInput, request: Request) -> Any:
     now = now_utc().isoformat()
     with db_conn() as conn:
         try:
-            cur = conn.execute(
+            group_id = _insert_and_get_id(
+                conn,
                 "INSERT INTO groups (name, group_type, created_by, created_at) VALUES (?, ?, ?, ?)",
                 (name[:80], group_type, user["id"], now),
             )
-        except sqlite3.IntegrityError:
+        except DB_INTEGRITY_ERRORS:
             raise HTTPException(status_code=400, detail="Group with same name and type already exists")
-        group_id = cur.lastrowid
         conn.execute(
             """
             INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at, approved_at)
@@ -7532,7 +7851,7 @@ def list_group_members(group_id: int, request: Request) -> Any:
             FROM group_memberships gm
             JOIN users u ON u.id = gm.user_id
             WHERE gm.group_id = ?
-            ORDER BY CASE gm.role WHEN 'admin' THEN 0 ELSE 1 END, u.username COLLATE NOCASE ASC
+            ORDER BY CASE gm.role WHEN 'admin' THEN 0 ELSE 1 END, LOWER(u.username) ASC
             """,
             (group_id,),
         ).fetchall()
@@ -7724,7 +8043,8 @@ def create_experiment(body: ExperimentCreateInput, request: Request) -> Any:
     if conversation_id is not None:
         conversation_owner_or_404(user["id"], conversation_id)
     with db_conn() as conn:
-        cur = conn.execute(
+        experiment_id = _insert_and_get_id(
+            conn,
             """
             INSERT INTO experiments (
                 owner_user_id, conversation_id, title, hypothesis, status,
@@ -7742,7 +8062,6 @@ def create_experiment(body: ExperimentCreateInput, request: Request) -> Any:
                 now,
             ),
         )
-        experiment_id = cur.lastrowid
     return {"ok": True, "id": experiment_id}
 
 
@@ -7922,7 +8241,7 @@ def list_brand_kb(request: Request) -> Any:
               ON latest.kb_key = b.kb_key AND latest.latest_version = b.version
             WHERE b.owner_id = ?
                OR (b.visibility IN ('task', 'company') AND gm.user_id IS NOT NULL)
-            ORDER BY b.kb_name COLLATE NOCASE ASC, b.kb_key ASC
+            ORDER BY LOWER(b.kb_name) ASC, b.kb_key ASC
             """
             ,
             (user["id"], user["id"], user["id"], user["id"]),
@@ -8217,7 +8536,8 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
     now = now_utc().isoformat()
     model_id = DEFAULT_MODEL_ID
     with db_conn() as conn:
-        cur = conn.execute(
+        conv_id = _insert_and_get_id(
+            conn,
             """
             INSERT INTO conversations (
                 user_id, title, model_id, task_mode, thinking_depth, visibility, share_group_id, created_at, updated_at
@@ -8226,7 +8546,6 @@ def create_conversation(body: ConversationCreateInput, request: Request) -> Any:
             """,
             (user["id"], title[:120], model_id, task_mode, thinking_depth, visibility, share_group_id, now, now),
         )
-        conv_id = cur.lastrowid
     return {
         "id": conv_id,
         "user_id": user["id"],
@@ -8546,7 +8865,8 @@ async def upload_document(conversation_id: int, request: Request, file: UploadFi
 
     now = now_utc().isoformat()
     with db_conn() as conn:
-        cur = conn.execute(
+        doc_id = _insert_and_get_id(
+            conn,
             """
             INSERT INTO documents (conversation_id, filename, content_type, file_path, text_content, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -8560,7 +8880,6 @@ async def upload_document(conversation_id: int, request: Request, file: UploadFi
                 now,
             ),
         )
-        doc_id = cur.lastrowid
         conn.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
             (now, conversation_id),
@@ -8710,11 +9029,11 @@ def _persist_assistant_message(
 ) -> dict[str, Any]:
     now2 = now_utc().isoformat()
     with db_conn() as conn:
-        cur = conn.execute(
+        assistant_message_id = _insert_and_get_id(
+            conn,
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
             (conversation_id, assistant_text, now2),
         )
-        assistant_message_id = cur.lastrowid
 
         orchestrator = agent_output.get("orchestrator") if isinstance(agent_output, dict) else None
         if isinstance(orchestrator, dict):
@@ -8793,11 +9112,11 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
 
     now = now_utc().isoformat()
     with db_conn() as conn:
-        user_cur = conn.execute(
+        user_message_id = _insert_and_get_id(
+            conn,
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
             (conversation_id, content, now),
         )
-        user_message_id = user_cur.lastrowid
 
     context = _build_message_context(conversation_id, conversation, body, content)
     runtime_result = _run_agent_with_model_fallback(
@@ -8837,11 +9156,11 @@ def send_message_stream(conversation_id: int, body: MessageInput, request: Reque
 
     now = now_utc().isoformat()
     with db_conn() as conn:
-        user_cur = conn.execute(
+        user_message_id = _insert_and_get_id(
+            conn,
             "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
             (conversation_id, content, now),
         )
-        user_message_id = user_cur.lastrowid
 
     context = _build_message_context(conversation_id, conversation, body, content)
     result_queue: Queue[tuple[str, Any]] = Queue()
@@ -8955,7 +9274,8 @@ def admin_create_user(body: AdminCreateUserInput, request: Request) -> Any:
 
     try:
         with db_conn() as conn:
-            cur = conn.execute(
+            user_id = _insert_and_get_id(
+                conn,
                 """
                 INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, created_at)
                 VALUES (?, ?, ?, ?, 1, ?)
@@ -8968,8 +9288,7 @@ def admin_create_user(body: AdminCreateUserInput, request: Request) -> Any:
                     now_utc().isoformat(),
                 ),
             )
-            user_id = cur.lastrowid
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         raise HTTPException(status_code=400, detail="用户名已存在")
 
     return {"id": user_id, "ok": True}

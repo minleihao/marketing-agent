@@ -61,6 +61,41 @@ This project is unified under one web app entrypoint with:
 3. Open:
    - `http://127.0.0.1:8000`
 
+## Database backend
+
+- Default: SQLite (`data/webapp.db`).
+- PostgreSQL: set `NOVARED_DATABASE_URL` (or `DATABASE_URL`) to a `postgresql://...` DSN.
+- When `NOVARED_DATABASE_URL` is present, the app auto-switches to PostgreSQL.
+
+Example:
+
+```bash
+export NOVARED_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/marketing_copilot"
+uv run python main.py
+```
+
+## Migrate data from SQLite to PostgreSQL
+
+1. Set PostgreSQL DSN:
+
+```bash
+export NOVARED_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/marketing_copilot"
+```
+
+2. Run migration:
+
+```bash
+uv run python scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-path data/webapp.db \
+  --postgres-url "$NOVARED_DATABASE_URL"
+```
+
+3. Restart app using PostgreSQL:
+
+```bash
+uv run python main.py
+```
+
 ## Default admin account
 
 - Username: `admin`

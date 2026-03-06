@@ -15,7 +15,8 @@
 - 模型调用链路：
 - Web API -> `/Users/minleihao/marketing-agent/novaRed/src/main.py` 的 `invoke()`
 - 数据存储：
-- SQLite：`NOVARED_DATA_DIR/webapp.db`（默认 `data/webapp.db`）
+- 默认 SQLite：`NOVARED_DATA_DIR/webapp.db`（默认 `data/webapp.db`）
+- 可切 PostgreSQL：设置 `NOVARED_DATABASE_URL`（或 `DATABASE_URL`）为 `postgresql://...`
 - 上传文件：`NOVARED_DATA_DIR/uploads/`
 
 ## 3) 权限模型（核心）
@@ -45,11 +46,13 @@
 - `join_group_ids` 创建 `pending` 申请，需组管理员批准
 
 ## 5) 数据与迁移注意
-- `init_db()` 负责建表与迁移（含 `ALTER TABLE` 补字段）。
+- `init_db()` 负责建表与迁移（SQLite + PostgreSQL 双后端）。
 - 变更 Schema 时务必保持向后兼容：
 - 新字段需要迁移逻辑
 - 不要假设数据库是全新状态
 - 现有 Knowledge Base 的 owner 回填逻辑依赖用户表，改动时要复核。
+- SQLite -> PostgreSQL 可用：
+- `/Users/minleihao/marketing-agent/novaRed/scripts/migrate_sqlite_to_postgres.py`
 
 ## 6) 前端开发注意
 - 聊天头部控件已优化为紧凑布局：下拉框两列显示，按钮单独一行。
