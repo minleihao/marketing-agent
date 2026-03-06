@@ -161,11 +161,39 @@ def test_send_message_passes_thinking_depth_to_runtime(webapp_module):
 
         msg_res = client.post(
             f"/api/conversations/{conversation_id}/messages",
-            json={"content": "hello"},
+            json={"content": "hello", "channels": ["email", "linkedin"]},
             headers=headers,
         )
         assert msg_res.status_code == 200, msg_res.text
         assert captured["payload"]["tool_args"]["thinking_depth"] == "high"
+        assert captured["payload"]["tool_args"]["channels"] == ["email", "linkedin"]
+        assert captured["payload"]["tool_args"]["channel"] == "email"
+
+
+def test_stream_message_endpoint_returns_sse(webapp_module):
+    webapp_module.invoke = lambda _payload: {"result": "streamed assistant reply"}
+
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "stream_user")
+        conv_res = client.post(
+            "/api/conversations",
+            json={"task_mode": "chat"},
+            headers=headers,
+        )
+        assert conv_res.status_code == 200, conv_res.text
+        conversation_id = conv_res.json()["id"]
+
+        with client.stream(
+            "POST",
+            f"/api/conversations/{conversation_id}/messages/stream",
+            json={"content": "hello"},
+            headers=headers,
+        ) as res:
+            assert res.status_code == 200, res.text
+            body = "".join(res.iter_text())
+
+        assert "event: delta" in body
+        assert "streamed assistant reply" in body
 
 
 def test_cannot_bind_private_kb_owned_by_other_user(webapp_module):

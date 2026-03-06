@@ -96,6 +96,32 @@ def test_invoke_uses_selected_model(monkeypatch):
     assert used["model_id"] == "us.amazon.nova-lite-v1:0"
 
 
+def test_invoke_accepts_channel_list(monkeypatch):
+    captured = {}
+
+    def fake_agent(prompt: str):
+        captured["prompt"] = prompt
+        return SimpleNamespace(message="ok")
+
+    monkeypatch.setattr(main, "_get_agent", lambda _model_id: fake_agent)
+    monkeypatch.setattr(main, "ORCHESTRATOR_ENABLED", False)
+
+    result = main.invoke(
+        {
+            "prompt": "Generate campaign copy",
+            "tool_args": {
+                "channels": ["email", "linkedin"],
+                "product": "Acme AI",
+                "audience": "B2B marketers",
+                "objective": "trial signup",
+            },
+        }
+    )
+
+    assert result == {"result": "ok"}
+    assert "- Channel: email, linkedin" in captured["prompt"]
+
+
 @pytest.mark.parametrize(
     "thinking_depth, expected_multiplier",
     [
@@ -144,6 +170,7 @@ def test_invoke_rejects_invalid_thinking_depth():
         ({"prompt": 123}, "`prompt` must be a string."),
         ({"prompt": "", "tool_args": {}}, "Either `prompt` or at least one marketing field is required."),
         ({"prompt": "hi", "tool_args": {"channel": "sms"}}, "`channel` must be one of:"),
+        ({"prompt": "hi", "tool_args": {"channels": ["email", "sms"]}}, "`channels` contains unsupported value"),
     ],
 )
 def test_invoke_validation_errors(payload, expected_message):

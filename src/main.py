@@ -132,6 +132,27 @@ def _ensure_string(value: Any, field_name: str, default: str = "") -> str:
     return value.strip()
 
 
+def _normalize_channel_selection(raw_channel: Any, raw_channels: Any) -> list[str]:
+    selected: list[str] = []
+    if isinstance(raw_channels, str):
+        raw_channels = [item.strip() for item in raw_channels.split(",")]
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                raise ValueError("`channels` must be a list of strings.")
+            value = item.strip().lower()
+            if value and value not in selected:
+                selected.append(value)
+    channel_value = _ensure_string(raw_channel, "channel")
+    if channel_value:
+        normalized = channel_value.lower()
+        if normalized not in selected:
+            selected.insert(0, normalized)
+    return selected
+
+
 def _normalize_model_id(model_id: str) -> str:
     return MODEL_ID_ALIASES.get(model_id, model_id)
 
@@ -436,8 +457,12 @@ def _normalize_brief_json(candidate: Any, *, fallback: dict[str, Any]) -> dict[s
     base["audience"] = str(base.get("audience") or fallback.get("audience") or "Broad target audience").strip()
     channel_plan = _ensure_str_list(base.get("channel_plan"))
     if not channel_plan:
-        fallback_channel = fallback.get("channel")
-        channel_plan = [fallback_channel] if fallback_channel else ["general"]
+        fallback_channels = _ensure_str_list(fallback.get("channel_plan"))
+        if fallback_channels:
+            channel_plan = fallback_channels
+        else:
+            fallback_channel = str(fallback.get("channel", "")).strip()
+            channel_plan = [fallback_channel] if fallback_channel else ["general"]
     base["channel_plan"] = channel_plan
     constraints = _ensure_str_list(base.get("constraints"))
     if not constraints:
@@ -605,6 +630,7 @@ def _run_marketing_orchestration(
     agent: Agent,
     user_prompt: str,
     channel: str,
+    channels: list[str],
     product: str,
     audience: str,
     objective: str,
@@ -627,6 +653,7 @@ def _run_marketing_orchestration(
         "objective": objective or "Increase qualified conversions",
         "audience": audience or "Broad target audience",
         "channel": channel,
+        "channel_plan": channels,
         "assumptions": [f"Assume product is {product}" if product else "Assume standard SaaS offer context"],
     }
     brief = _normalize_brief_json(_safe_json_loads(brief_text, {}), fallback=brief_fallback)
@@ -688,6 +715,7 @@ def invoke(payload: Dict[str, Any]):
       "prompt": "<free-form user request>",
       "tool_args": {
          "channel": "email | linkedin | x | wechat | landing_page | other",
+         "channels": ["email", "linkedin"],
          "product": "<what we are promoting>",
          "audience": "<who we are targeting>",
          "objective": "<lead gen | sign-up | brand awareness | event registration | etc.>",
@@ -703,7 +731,11 @@ def invoke(payload: Dict[str, Any]):
         user_prompt = _ensure_string(payload_dict.get("prompt", ""), "prompt")
         marketing_context = _get_marketing_context(payload_dict)
 
+        raw_channels = marketing_context.get("channels")
         channel = _ensure_string(marketing_context.get("channel"), "channel")
+        channels = _normalize_channel_selection(channel, raw_channels)
+        if channels:
+            channel = channels[0]
         product = _ensure_string(marketing_context.get("product"), "product")
         audience = _ensure_string(marketing_context.get("audience"), "audience")
         objective = _ensure_string(marketing_context.get("objective"), "objective")
@@ -721,13 +753,21 @@ def invoke(payload: Dict[str, Any]):
         include_trace = bool(marketing_context.get("include_trace", False))
         output_sections = _normalize_output_sections(marketing_context.get("output_sections"))
 
-        if channel and channel.lower() not in VALID_CHANNELS:
+        if raw_channels is not None and channels:
+            invalid_channels = [item for item in channels if item not in VALID_CHANNELS]
+            if invalid_channels:
+                valid = ", ".join(sorted(VALID_CHANNELS))
+                raise ValueError(
+                    f"`channels` contains unsupported value(s): {', '.join(invalid_channels)}. Allowed: {valid}."
+                )
+        elif channel and channel.lower() not in VALID_CHANNELS:
             valid = ", ".join(sorted(VALID_CHANNELS))
             raise ValueError(f"`channel` must be one of: {valid}.")
         if not _is_allowed_model_id(model_id):
             raise ValueError(f"`model_id` is not allowed: {model_id}")
 
-        has_structured_context = any([channel, product, audience, objective])
+        channel_label = ", ".join(channels) if channels else channel
+        has_structured_context = any([channel_label, product, audience, objective])
         if not user_prompt and not has_structured_context:
             raise ValueError("Either `prompt` or at least one marketing field is required.")
 
@@ -748,7 +788,8 @@ def invoke(payload: Dict[str, Any]):
                 orchestrator_payload = _run_marketing_orchestration(
                     agent=agent,
                     user_prompt=user_prompt,
-                    channel=channel,
+                    channel=channel_label,
+                    channels=channels,
                     product=product,
                     audience=audience,
                     objective=objective,
@@ -760,7 +801,7 @@ def invoke(payload: Dict[str, Any]):
             else:
                 final_prompt = marketing_prompt(
                     user_prompt=user_prompt,
-                    channel=channel,
+                    channel=channel_label,
                     product=product,
                     audience=audience,
                     objective=objective,
@@ -795,8 +836,8 @@ def invoke(payload: Dict[str, Any]):
         if _is_credentials_error(exc):
             return {
                 "result": _local_fallback_response(
-                    user_prompt=user_prompt,
-                    channel=channel,
+                user_prompt=user_prompt,
+                    channel=channel_label,
                     product=product,
                     audience=audience,
                     objective=objective,

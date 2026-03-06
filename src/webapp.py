@@ -13,10 +13,11 @@ from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Iterator
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from model.load import DEFAULT_MODEL_ID
@@ -1228,6 +1229,7 @@ class MessageInput(BaseModel):
     ui_language: str | None = None
     output_sections: list[str] | None = None
     channel: str | None = None
+    channels: list[str] | None = None
     product: str | None = None
     audience: str | None = None
     objective: str | None = None
@@ -1961,6 +1963,21 @@ APP_HTML = """
     .msg-content h4 { font-size:15px; }
     .msg-content ul, .msg-content ol { margin:0 0 10px 18px; padding:0; }
     .msg-content li { margin:3px 0; }
+    .msg-content li.check-item {
+      list-style:none;
+      margin-left:-18px;
+      display:flex;
+      align-items:flex-start;
+      gap:8px;
+    }
+    .msg-content li.check-item input[type="checkbox"] {
+      margin-top:2px;
+      width:14px;
+      height:14px;
+      accent-color:#1f6fd8;
+      pointer-events:none;
+    }
+    .msg-content li.check-item span { flex:1; }
     .msg-content blockquote {
       margin:8px 0 12px;
       padding:8px 12px;
@@ -2220,6 +2237,7 @@ APP_HTML = """
     .brief-grid .full { grid-column:1 / -1; }
     .brief-grid label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
     .brief-grid textarea { min-height:58px; }
+    .brief-grid select[multiple] { min-height:96px; }
     .output-sections {
       display:flex;
       flex-wrap:wrap;
@@ -2517,8 +2535,7 @@ APP_HTML = """
           <div class="brief-grid">
             <div>
               <label for="brief-channel" data-i18n="brief_channel">Channel</label>
-              <select id="brief-channel">
-                <option value=""></option>
+              <select id="brief-channel" multiple size="6">
                 <option value="email">email</option>
                 <option value="linkedin">linkedin</option>
                 <option value="x">x</option>
@@ -2526,6 +2543,7 @@ APP_HTML = """
                 <option value="landing_page">landing_page</option>
                 <option value="other">other</option>
               </select>
+              <div class="hint" data-i18n="brief_channel_hint">可多选（按住 Ctrl/Cmd 可连续选择）。</div>
             </div>
             <div>
               <label for="brief-product" data-i18n="brief_product">Product</label>
@@ -2620,6 +2638,7 @@ const I18N = {
     export_chat: '导出聊天',
     rename_chat: '重命名',
     brief_channel: '渠道',
+    brief_channel_hint: '可多选（按住 Ctrl/Cmd 可连续选择）。',
     brief_prompt: '任务指令',
     brief_product: '产品',
     brief_audience: '受众',
@@ -2653,6 +2672,7 @@ const I18N = {
     thinking: '思考中...',
     request_failed: '请求失败',
     request_error: '请求失败',
+    request_timeout: '请求超时，请稍后重试',
     default_chat_title: '新对话',
     default_marketing_title: '新营销任务',
     upload_failed: '上传失败',
@@ -2751,6 +2771,7 @@ const I18N = {
     export_chat: 'Export Chat',
     rename_chat: 'Rename',
     brief_channel: 'Channel',
+    brief_channel_hint: 'Multi-select supported (hold Ctrl/Cmd to select multiple).',
     brief_prompt: 'Prompt',
     brief_product: 'Product',
     brief_audience: 'Audience',
@@ -2784,6 +2805,7 @@ const I18N = {
     thinking: 'Thinking...',
     request_failed: 'Request failed',
     request_error: 'Request failed',
+    request_timeout: 'Request timed out. Please try again.',
     default_chat_title: 'New Chat',
     default_marketing_title: 'New Marketing Task',
     upload_failed: 'Upload failed',
@@ -3093,21 +3115,158 @@ function selectedOutputSections() {
   return checks.filter((item) => item.checked).map((item) => item.value);
 }
 
+function selectedChannels() {
+  const select = document.getElementById('brief-channel');
+  if (!select) return [];
+  return [...select.options]
+    .filter((option) => option.selected && option.value)
+    .map((option) => option.value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 async function api(url, options={}) {
   const method = (options.method || 'GET').toUpperCase();
   const headers = options.body instanceof FormData ? {} : {'Content-Type':'application/json'};
   if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
     headers['X-CSRF-Token'] = csrfToken;
   }
-  const res = await fetch(url, {headers, ...options});
+  const controller = options.signal ? null : new AbortController();
+  const signal = options.signal || (controller ? controller.signal : undefined);
+  const timeoutMs = 305000;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(url, {headers, ...options, signal});
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      const timeoutError = new Error(t('request_timeout'));
+      timeoutError.status = 408;
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+
   let data = {};
-  try { data = await res.json(); } catch (_) {}
+  let rawText = '';
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('application/json')) {
+    try { data = await res.json(); } catch (_) {}
+  } else {
+    try { rawText = await res.text(); } catch (_) {}
+  }
   if (!res.ok) {
-    const error = new Error(data.detail || t('request_failed'));
+    const detail = (data && typeof data.detail === 'string' && data.detail.trim())
+      ? data.detail.trim()
+      : (rawText || '').trim();
+    const isTimeout = [408, 502, 503, 504].includes(res.status) || /timed?\\s*out/i.test(detail);
+    const message = isTimeout
+      ? t('request_timeout')
+      : (detail || `${t('request_failed')} (HTTP ${res.status})`);
+    const error = new Error(message);
     error.status = res.status;
     throw error;
   }
   return data;
+}
+
+function parseSseBlock(block) {
+  const lines = block.split('\n');
+  let event = 'message';
+  const dataParts = [];
+  for (const line of lines) {
+    if (!line || line.startsWith(':')) continue;
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim() || 'message';
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataParts.push(line.slice(5).trim());
+    }
+  }
+  let data = {};
+  const raw = dataParts.join('\n');
+  if (raw) {
+    try { data = JSON.parse(raw); } catch { data = {raw}; }
+  }
+  return {event, data};
+}
+
+async function streamMessage(url, payload, onDelta) {
+  const headers = {'Content-Type':'application/json'};
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  const controller = new AbortController();
+  const timeoutMs = 305000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      const timeoutError = new Error(t('request_timeout'));
+      timeoutError.status = 408;
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!res.ok) {
+    let data = {};
+    let rawText = '';
+    try { data = await res.json(); } catch {
+      try { rawText = await res.text(); } catch {}
+    }
+    const detail = (data && typeof data.detail === 'string' && data.detail.trim())
+      ? data.detail.trim()
+      : (rawText || '').trim();
+    const isTimeout = [408, 502, 503, 504].includes(res.status) || /timed?\\s*out/i.test(detail);
+    const message = isTimeout ? t('request_timeout') : (detail || `${t('request_failed')} (HTTP ${res.status})`);
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
+  }
+
+  if (!res.body) {
+    throw new Error(t('request_failed'));
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let finalMessage = null;
+
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const blocks = buffer.split('\n\n');
+    buffer = blocks.pop() || '';
+    for (const block of blocks) {
+      const parsed = parseSseBlock(block);
+      if (parsed.event === 'delta' && parsed.data && typeof parsed.data.text === 'string') {
+        onDelta(parsed.data.text);
+      } else if (parsed.event === 'done' && parsed.data && parsed.data.assistant_message) {
+        finalMessage = parsed.data.assistant_message;
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    const parsed = parseSseBlock(buffer);
+    if (parsed.event === 'done' && parsed.data && parsed.data.assistant_message) {
+      finalMessage = parsed.data.assistant_message;
+    }
+  }
+  return finalMessage;
 }
 
 async function loadCsrfToken() {
@@ -3375,7 +3534,8 @@ function formatInline(rawText) {
   let text = escapeHtml(rawText);
   const codeTokens = [];
   text = text.replace(/`([^`]+)`/g, (_, code) => {
-    const token = `__CODE_${codeTokens.length}__`;
+    // Use a token that does not conflict with markdown markers like "_" or "*".
+    const token = `@@CODETOKEN${codeTokens.length}@@`;
     codeTokens.push(`<code>${escapeHtml(code)}</code>`);
     return token;
   });
@@ -3385,13 +3545,12 @@ function formatInline(rawText) {
     if (!href) return `${label} (${url})`;
     return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   });
-  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  // Keep inline emphasis conservative to avoid breaking placeholders like {PRODUCT_NAME}.
+  text = text.replace(/\*\*([^*\\n]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/\*([^*\\n]+)\*/g, '<em>$1</em>');
-  text = text.replace(/_([^_\\n]+)_/g, '<em>$1</em>');
 
   for (let idx = 0; idx < codeTokens.length; idx += 1) {
-    text = text.replace(`__CODE_${idx}__`, codeTokens[idx]);
+    text = text.replace(`@@CODETOKEN${idx}@@`, codeTokens[idx]);
   }
   return text;
 }
@@ -3410,6 +3569,23 @@ function splitTableRow(line) {
   return normalized.split('|').map((x) => x.trim());
 }
 
+function isTsvLine(line) {
+  const raw = String(line || '');
+  if (!raw.includes('\t')) return false;
+  const cells = raw.split('\t').map((x) => x.trim()).filter((x) => x.length > 0);
+  return cells.length >= 2;
+}
+
+function splitTsvRow(line) {
+  return String(line || '').split('\t').map((x) => x.trim());
+}
+
+function normalizeTableRow(row, width) {
+  const cells = Array.isArray(row) ? row.slice(0, width) : [];
+  while (cells.length < width) cells.push('');
+  return cells;
+}
+
 function isParagraphStop(line) {
   const text = line.trim();
   if (!text) return true;
@@ -3419,6 +3595,7 @@ function isParagraphStop(line) {
   if (/^>\s?/.test(text)) return true;
   if (/^[-*+]\s+/.test(text)) return true;
   if (/^\d+\.\s+/.test(text)) return true;
+  if (/\t/.test(text)) return true;
   return false;
 }
 
@@ -3471,12 +3648,35 @@ function markdownToHtml(rawText) {
         rows.push(splitTableRow(rowLine));
         i += 1;
       }
-      const thead = `<thead><tr>${headers.map((cell) => `<th>${formatInline(cell)}</th>`).join('')}</tr></thead>`;
+      const width = Math.max(headers.length, ...rows.map((row) => row.length), 1);
+      const normalizedHeaders = normalizeTableRow(headers, width);
+      const normalizedRows = rows.map((row) => normalizeTableRow(row, width));
+      const thead = `<thead><tr>${normalizedHeaders.map((cell) => `<th>${formatInline(cell)}</th>`).join('')}</tr></thead>`;
       const tbody = rows.length
-        ? `<tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${formatInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`
+        ? `<tbody>${normalizedRows.map((row) => `<tr>${row.map((cell) => `<td>${formatInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`
         : '';
       out.push(`<table>${thead}${tbody}</table>`);
       continue;
+    }
+
+    if (isTsvLine(line)) {
+      const headers = splitTsvRow(line);
+      const rows = [];
+      let j = i + 1;
+      while (j < lines.length && isTsvLine(lines[j])) {
+        rows.push(splitTsvRow(lines[j]));
+        j += 1;
+      }
+      if (rows.length) {
+        const width = Math.max(headers.length, ...rows.map((row) => row.length), 1);
+        const normalizedHeaders = normalizeTableRow(headers, width);
+        const normalizedRows = rows.map((row) => normalizeTableRow(row, width));
+        const thead = `<thead><tr>${normalizedHeaders.map((cell) => `<th>${formatInline(cell)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${normalizedRows.map((row) => `<tr>${row.map((cell) => `<td>${formatInline(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+        out.push(`<table>${thead}${tbody}</table>`);
+        i = j;
+        continue;
+      }
     }
 
     if (/^[-*+]\s+/.test(trimmed)) {
@@ -3485,7 +3685,15 @@ function markdownToHtml(rawText) {
         const row = lines[i].trim();
         const match = row.match(/^[-*+]\s+(.+)$/);
         if (!match) break;
-        items.push(`<li>${formatInline(match[1])}</li>`);
+        const checkMatch = match[1].match(/^\[( |x|X)\]\s+(.+)$/);
+        if (checkMatch) {
+          const checked = checkMatch[1].toLowerCase() === 'x';
+          items.push(
+            `<li class="check-item"><input type="checkbox" disabled ${checked ? 'checked' : ''} /><span>${formatInline(checkMatch[2])}</span></li>`
+          );
+        } else {
+          items.push(`<li>${formatInline(match[1])}</li>`);
+        }
         i += 1;
       }
       out.push(`<ul>${items.join('')}</ul>`);
@@ -4243,18 +4451,25 @@ async function sendMessage() {
     const active = currentConversation();
     const payload = { content, ui_language: currentLang };
     if (active && active.task_mode === 'marketing') {
-      payload.channel = document.getElementById('brief-channel').value || null;
+      const channels = selectedChannels();
+      payload.channels = channels;
+      payload.channel = channels.length ? channels[0] : null;
       payload.product = document.getElementById('brief-product').value.trim() || null;
       payload.audience = document.getElementById('brief-audience').value.trim() || null;
       payload.objective = document.getElementById('brief-objective').value.trim() || null;
       payload.extra_requirements = document.getElementById('brief-extra').value.trim() || null;
       payload.output_sections = selectedOutputSections();
     }
-    const data = await api(`/api/conversations/${activeConversationId}/messages`, {
-      method:'POST',
-      body: JSON.stringify(payload)
+    let streamedText = '';
+    const assistantMessage = await streamMessage(`/api/conversations/${activeConversationId}/messages/stream`, payload, (delta) => {
+      streamedText += delta;
+      setMessageContent(pendingBot, streamedText);
+      box.scrollTop = box.scrollHeight;
     });
-    setMessageContent(pendingBot, data.assistant_message.content);
+    if (!streamedText && assistantMessage && typeof assistantMessage.content === 'string') {
+      streamedText = assistantMessage.content;
+    }
+    setMessageContent(pendingBot, streamedText || t('request_failed'));
     const refreshedItems = await api(`/api/conversations/${activeConversationId}/messages`);
     renderMessages(refreshedItems);
     await loadOrchestratorRuns(activeConversationId);
@@ -8314,25 +8529,29 @@ def delete_document(conversation_id: int, document_id: int, request: Request) ->
     return {"ok": True}
 
 
-@app.post("/api/conversations/{conversation_id}/messages")
-def send_message(conversation_id: int, body: MessageInput, request: Request) -> Any:
-    user = must_login(request)
-    conversation = conversation_visible_or_404(user["id"], conversation_id)
+def _ui_is_english(ui_language: str | None) -> bool:
+    return str(ui_language or "").lower().startswith("en")
 
-    content = body.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="消息不能为空")
 
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        user_cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-            (conversation_id, content, now),
-        )
-        user_message_id = user_cur.lastrowid
+def _selected_channels_from_body(body: MessageInput) -> list[str]:
+    selected: list[str] = []
+    if isinstance(body.channels, list):
+        for item in body.channels:
+            value = str(item or "").strip().lower()
+            if value and value not in selected:
+                selected.append(value)
+    single = str(body.channel or "").strip().lower()
+    if single and single not in selected:
+        selected.insert(0, single)
+    return selected
 
-    context = {
-        "channel": body.channel,
+
+def _build_message_context(conversation_id: int, conversation: sqlite3.Row, body: MessageInput, content: str) -> dict[str, Any]:
+    channels = _selected_channels_from_body(body)
+    primary_channel = channels[0] if channels else (str(body.channel or "").strip() or None)
+    context: dict[str, Any] = {
+        "channel": primary_channel,
+        "channels": channels,
         "product": body.product,
         "audience": body.audience,
         "objective": body.objective,
@@ -8343,6 +8562,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         "thinking_depth": conversation["thinking_depth"] if "thinking_depth" in conversation.keys() else DEFAULT_THINKING_DEPTH,
         "include_trace": True,
     }
+
     extra_parts = []
     if body.extra_requirements:
         extra_parts.append(body.extra_requirements)
@@ -8356,10 +8576,20 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
     if doc_context:
         extra_parts.append(doc_context)
     context["extra_requirements"] = "\n\n".join(extra_parts) if extra_parts else None
+    return context
 
+
+def _run_agent_with_model_fallback(
+    *,
+    content: str,
+    context: dict[str, Any],
+    original_model_id: str,
+    ui_language: str | None,
+) -> dict[str, Any]:
+    is_en = _ui_is_english(ui_language)
     model_fallback_used = False
-    original_model_id = conversation["model_id"]
     agent_output = invoke({"prompt": content, "tool_args": context})
+    assistant_text = ""
 
     if "error" in agent_output and original_model_id != DEFAULT_MODEL_ID:
         fallback_context = dict(context)
@@ -8368,10 +8598,16 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         if "error" not in fallback_output:
             model_fallback_used = True
             agent_output = fallback_output
-            assistant_text = (
-                f"[系统提示] 模型 `{original_model_id}` 调用失败，已自动回退到 `{DEFAULT_MODEL_ID}`。\n\n"
-                f"{fallback_output.get('result', '')}"
-            )
+            if is_en:
+                assistant_text = (
+                    f"[System] Model `{original_model_id}` failed, automatically fell back to `{DEFAULT_MODEL_ID}`.\n\n"
+                    f"{fallback_output.get('result', '')}"
+                )
+            else:
+                assistant_text = (
+                    f"[系统提示] 模型 `{original_model_id}` 调用失败，已自动回退到 `{DEFAULT_MODEL_ID}`。\n\n"
+                    f"{fallback_output.get('result', '')}"
+                )
         else:
             agent_output = fallback_output
 
@@ -8379,12 +8615,30 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
         error_block = agent_output.get("error", {}) or {}
         message = error_block.get("message", "unknown")
         details = error_block.get("details")
-        assistant_text = f"[错误] {message}"
+        assistant_text = f"[Error] {message}" if is_en else f"[错误] {message}"
         if details:
             assistant_text += f"\n{details}"
     elif not model_fallback_used:
         assistant_text = agent_output.get("result", "")
 
+    return {
+        "assistant_text": assistant_text,
+        "agent_output": agent_output,
+        "model_fallback_used": model_fallback_used,
+        "resolved_model_id": DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+    }
+
+
+def _persist_assistant_message(
+    *,
+    conversation: sqlite3.Row,
+    conversation_id: int,
+    user_message_id: int,
+    user_content: str,
+    assistant_text: str,
+    agent_output: dict[str, Any],
+    resolved_model_id: str,
+) -> dict[str, Any]:
     now2 = now_utc().isoformat()
     with db_conn() as conn:
         cur = conn.execute(
@@ -8407,7 +8661,7 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
                     conversation_id,
                     user_message_id,
                     assistant_message_id,
-                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    resolved_model_id,
                     _json_dumps(orchestrator.get("brief")),
                     _json_dumps(orchestrator.get("plan")),
                     _json_dumps(orchestrator.get("evaluation")),
@@ -8416,12 +8670,11 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
             )
 
         if _is_default_conversation_title(conversation["title"]):
-            new_title = content[:30]
             conn.execute(
                 "UPDATE conversations SET title = ?, model_id = ?, updated_at = ? WHERE id = ?",
                 (
-                    new_title,
-                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    user_content[:30],
+                    resolved_model_id,
                     now2,
                     conversation_id,
                 ),
@@ -8430,21 +8683,160 @@ def send_message(conversation_id: int, body: MessageInput, request: Request) -> 
             conn.execute(
                 "UPDATE conversations SET model_id = ?, updated_at = ? WHERE id = ?",
                 (
-                    DEFAULT_MODEL_ID if model_fallback_used else original_model_id,
+                    resolved_model_id,
                     now2,
                     conversation_id,
                 ),
             )
 
     _refresh_conversation_summary(conversation_id)
+    return {"assistant_created_at": now2}
+
+
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _chunk_text(text: str, *, size: int = 96) -> list[str]:
+    clean = str(text or "")
+    if not clean:
+        return []
+    return [clean[i : i + size] for i in range(0, len(clean), size)]
+
+
+@app.post("/api/conversations/{conversation_id}/messages")
+def send_message(conversation_id: int, body: MessageInput, request: Request) -> Any:
+    user = must_login(request)
+    conversation = conversation_visible_or_404(user["id"], conversation_id)
+
+    content = body.content.strip()
+    if not content:
+        detail = "Message cannot be empty" if _ui_is_english(body.ui_language) else "消息不能为空"
+        raise HTTPException(status_code=400, detail=detail)
+
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        user_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+            (conversation_id, content, now),
+        )
+        user_message_id = user_cur.lastrowid
+
+    context = _build_message_context(conversation_id, conversation, body, content)
+    runtime_result = _run_agent_with_model_fallback(
+        content=content,
+        context=context,
+        original_model_id=conversation["model_id"],
+        ui_language=body.ui_language,
+    )
+    persist_result = _persist_assistant_message(
+        conversation=conversation,
+        conversation_id=conversation_id,
+        user_message_id=user_message_id,
+        user_content=content,
+        assistant_text=runtime_result["assistant_text"],
+        agent_output=runtime_result["agent_output"],
+        resolved_model_id=runtime_result["resolved_model_id"],
+    )
 
     return {
         "assistant_message": {
             "role": "assistant",
-            "content": assistant_text,
-            "created_at": now2,
+            "content": runtime_result["assistant_text"],
+            "created_at": persist_result["assistant_created_at"],
         }
     }
+
+
+@app.post("/api/conversations/{conversation_id}/messages/stream")
+def send_message_stream(conversation_id: int, body: MessageInput, request: Request) -> Any:
+    user = must_login(request)
+    conversation = conversation_visible_or_404(user["id"], conversation_id)
+
+    content = body.content.strip()
+    if not content:
+        detail = "Message cannot be empty" if _ui_is_english(body.ui_language) else "消息不能为空"
+        raise HTTPException(status_code=400, detail=detail)
+
+    now = now_utc().isoformat()
+    with db_conn() as conn:
+        user_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+            (conversation_id, content, now),
+        )
+        user_message_id = user_cur.lastrowid
+
+    context = _build_message_context(conversation_id, conversation, body, content)
+    result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            runtime_result = _run_agent_with_model_fallback(
+                content=content,
+                context=context,
+                original_model_id=conversation["model_id"],
+                ui_language=body.ui_language,
+            )
+            result_queue.put(("ok", runtime_result))
+        except Exception as exc:  # pragma: no cover - fallback protection for stream path
+            result_queue.put(("err", exc))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    def stream() -> Iterator[str]:
+        yield _sse_event("status", {"state": "processing"})
+
+        runtime_result: dict[str, Any]
+        while True:
+            try:
+                status, payload = result_queue.get(timeout=0.35)
+                if status == "ok":
+                    runtime_result = payload
+                else:
+                    error_prefix = "[Error]" if _ui_is_english(body.ui_language) else "[错误]"
+                    runtime_result = {
+                        "assistant_text": f"{error_prefix} {type(payload).__name__}: {payload}",
+                        "agent_output": {},
+                        "resolved_model_id": conversation["model_id"],
+                    }
+                break
+            except Empty:
+                yield ": keep-alive\n\n"
+
+        persist_result = _persist_assistant_message(
+            conversation=conversation,
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            user_content=content,
+            assistant_text=runtime_result["assistant_text"],
+            agent_output=runtime_result["agent_output"],
+            resolved_model_id=runtime_result["resolved_model_id"],
+        )
+
+        for chunk in _chunk_text(runtime_result["assistant_text"]):
+            yield _sse_event("delta", {"text": chunk})
+            time.sleep(0.01)
+        yield _sse_event(
+            "done",
+            {
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": runtime_result["assistant_text"],
+                    "created_at": persist_result["assistant_created_at"],
+                }
+            },
+        )
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class AdminStatusInput(BaseModel):
