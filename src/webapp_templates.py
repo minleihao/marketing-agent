@@ -3996,6 +3996,7 @@ GROUPS_HTML = """
     .toolbar button.active { background:#0a67d3; color:#fff; border-color:#0a67d3; }
     .layout { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
     .card { background:#fff; border:1px solid #d6dfec; border-radius:14px; padding:12px; box-shadow:0 8px 20px rgba(16,32,62,.08); }
+    .card-span-2 { grid-column:1 / -1; }
     h2, h3 { margin:0 0 10px; }
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
     input, select, button { padding:8px 10px; border:1px solid #d6dfec; border-radius:10px; background:#fff; }
@@ -4004,6 +4005,19 @@ GROUPS_HTML = """
     button.danger:hover { background:#fee2e2; }
     .list { display:flex; flex-direction:column; gap:8px; max-height:260px; overflow:auto; }
     .item { border:1px solid #d6dfec; border-radius:10px; padding:8px; }
+    .manage-groups { display:grid; gap:12px; }
+    .group-panel { border:1px solid #d6dfec; border-radius:14px; padding:12px; background:linear-gradient(180deg,#ffffff,#f8fbff); }
+    .panel-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
+    .panel-head strong { display:block; margin-bottom:4px; }
+    .panel-meta { font-size:12px; color:#5b6b80; }
+    .pill { display:inline-flex; align-items:center; gap:4px; border:1px solid #d6dfec; border-radius:999px; padding:4px 8px; font-size:12px; color:#375072; background:#f8fbff; white-space:nowrap; }
+    .panel-sections { display:grid; gap:10px; }
+    .section-block { border-top:1px solid #e4ebf4; padding-top:10px; }
+    .section-title { font-size:12px; font-weight:700; color:#5b6b80; text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px; }
+    .section-list { display:flex; flex-direction:column; gap:8px; }
+    .section-list .item { padding:8px 10px; }
+    .header-row { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+    .header-row select { min-width:240px; }
     .meta { font-size:12px; color:#5b6b80; margin-top:4px; }
     .small { font-size:12px; color:#5b6b80; }
     .ok { color:#0f766e; }
@@ -4048,9 +4062,6 @@ GROUPS_HTML = """
         <div id="create-msg" class="small"></div>
 
         <h3 style="margin-top:14px" data-i18n="my_groups">我的组</h3>
-        <div class="row">
-          <select id="manage-group-select" onchange="loadManageGroup()"></select>
-        </div>
         <div id="my-groups" class="list"></div>
       </div>
 
@@ -4061,23 +4072,37 @@ GROUPS_HTML = """
         <div id="invites" class="list"></div>
       </div>
 
-      <div class="card">
-        <h3 data-i18n="members">组成员</h3>
-        <div id="members" class="list"></div>
-      </div>
-
-      <div class="card">
-        <h3 data-i18n="requests">待审批请求</h3>
-        <div id="requests" class="list"></div>
-        <div class="row" style="margin-top:10px">
-          <input id="invite-username" data-i18n-placeholder="invite_user" placeholder="邀请用户名" />
-          <button id="invite-btn" onclick="inviteUser()" data-i18n="invite">邀请</button>
+      <div class="card card-span-2">
+        <div class="header-row">
+          <h3 data-i18n="members">组成员</h3>
+          <select id="manage-group-select" onchange="changeManageGroup()"></select>
         </div>
-        <div class="row">
-          <input id="transfer-user-id" data-i18n-placeholder="transfer_user_id" placeholder="新管理员 user_id" />
-          <button id="transfer-btn" onclick="transferAdmin()" data-i18n="transfer_admin">转移管理员</button>
+        <div id="manage-groups" class="manage-groups">
+          <div class="group-panel">
+            <div class="panel-sections">
+              <div class="section-block">
+                <div class="section-title" data-i18n="members">组成员</div>
+                <div id="members" class="section-list"></div>
+              </div>
+              <div class="section-block">
+                <div class="section-title" data-i18n="requests">待审批请求</div>
+                <div id="requests" class="section-list"></div>
+              </div>
+              <div class="section-block">
+                <div class="section-title" data-i18n="invite">邀请</div>
+                <div class="row">
+                  <input id="invite-username" data-i18n-placeholder="invite_user" placeholder="邀请用户名" />
+                  <button id="invite-btn" onclick="inviteUser()" data-i18n="invite">邀请</button>
+                </div>
+                <div class="row">
+                  <input id="transfer-user-id" data-i18n-placeholder="transfer_user_id" placeholder="新管理员 user_id" />
+                  <button id="transfer-btn" onclick="transferAdmin()" data-i18n="transfer_admin">转移管理员</button>
+                </div>
+                <div id="manage-msg" class="small"></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div id="manage-msg" class="small"></div>
       </div>
     </div>
   </div>
@@ -4095,6 +4120,7 @@ const I18N = {
     task_group: '任务小组',
     create: '创建',
     my_groups: '我的组',
+    group_details: '分组详情',
     all_groups: '可加入的组',
     invites: '我的邀请',
     members: '组成员',
@@ -4138,6 +4164,7 @@ const I18N = {
     task_group: 'Task Group',
     create: 'Create',
     my_groups: 'My Groups',
+    group_details: 'Group Details',
     all_groups: 'Discover Groups',
     invites: 'My Invitations',
     members: 'Members',
@@ -4176,6 +4203,9 @@ let currentLang = localStorage.getItem('nova_lang') || 'zh';
 let me = null;
 let myGroups = [];
 let allGroups = [];
+let groupInvites = [];
+let manageGroups = [];
+let activeManageGroupId = '';
 let csrfToken = '';
 
 function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
@@ -4231,21 +4261,15 @@ function setInitError(message) {
   msg.textContent = `${t('save_fail')}: ${message || t('request_failed')}`;
   msg.className = 'small warn';
 }
-function toggleManageActions(enabled) {
-  const inviteInput = document.getElementById('invite-username');
-  const inviteBtn = document.getElementById('invite-btn');
-  const transferInput = document.getElementById('transfer-user-id');
-  const transferBtn = document.getElementById('transfer-btn');
-  [inviteInput, inviteBtn, transferInput, transferBtn].forEach((el) => {
-    if (el) el.disabled = !enabled;
-  });
-}
 function roleLabel(role) { return role === 'admin' ? t('admin') : t('member'); }
 function statusLabel(status) {
   if (status === 'approved') return t('approved');
   if (status === 'pending') return t('pending');
   if (status === 'invited') return t('invited');
   return status || '';
+}
+function groupTypeLabel(groupType) {
+  return groupType === 'company' ? t('company_group') : t('task_group');
 }
 function canDeleteGroup(group) {
   if (!group || !me) return false;
@@ -4254,16 +4278,14 @@ function canDeleteGroup(group) {
 function renderAll() {
   renderMyGroups();
   renderDiscoverGroups();
+  renderInvites();
+  renderManageGroupDetails();
 }
 function renderMyGroups() {
   const box = document.getElementById('my-groups');
-  const select = document.getElementById('manage-group-select');
-  const previous = select.value;
   box.innerHTML = '';
-  select.innerHTML = '';
   if (!myGroups.length) {
     box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-    toggleManageActions(false);
     return;
   }
   for (const g of myGroups) {
@@ -4275,23 +4297,11 @@ function renderMyGroups() {
       actions.push(`<button class="danger" onclick="deleteGroup(${g.id})">${t('delete_group')}</button>`);
     }
     item.innerHTML = `
-      <div><strong>${g.name}</strong> (${g.group_type})</div>
+      <div><strong>${g.name}</strong> (${groupTypeLabel(g.group_type)})</div>
       <div class="meta">${roleLabel(g.role)} · ${statusLabel(g.status)}</div>
       <div class="row" style="margin-top:6px">${actions.join('')}</div>
     `;
     box.appendChild(item);
-    const opt = document.createElement('option');
-    opt.value = String(g.id);
-    opt.textContent = `${g.name} (${g.group_type}) · ${statusLabel(g.status)}`;
-    select.appendChild(opt);
-  }
-  if ([...select.options].some((opt) => opt.value === previous)) {
-    select.value = previous;
-    return;
-  }
-  const approved = myGroups.find((g) => g.status === 'approved');
-  if (approved) {
-    select.value = String(approved.id);
   }
 }
 function renderDiscoverGroups() {
@@ -4313,8 +4323,8 @@ function renderDiscoverGroups() {
       actions.push(`<button class="danger" onclick="deleteGroup(${g.id})">${t('delete_group')}</button>`);
     }
     item.innerHTML = `
-      <div><strong>${g.name}</strong> (${g.group_type})</div>
-      <div class="meta">members: ${g.approved_member_count}${status ? ` · ${status}` : ''}</div>
+      <div><strong>${g.name}</strong> (${groupTypeLabel(g.group_type)})</div>
+      <div class="meta">${t('members')}: ${g.approved_member_count}${status ? ` · ${status}` : ''}</div>
       <div class="row" style="margin-top:6px">${actions.join('')}</div>`;
     box.appendChild(item);
   }
@@ -4326,22 +4336,24 @@ async function refreshData() {
     api('/api/groups'),
   ]);
   await loadInvites();
+  await loadManageGroups();
   renderAll();
-  await loadManageGroup();
 }
 async function loadInvites() {
-  const invites = await api('/api/groups/invitations');
+  groupInvites = await api('/api/groups/invitations');
+}
+function renderInvites() {
   const box = document.getElementById('invites');
   box.innerHTML = '';
-  if (!invites.length) {
+  if (!groupInvites.length) {
     box.innerHTML = `<div class="item small">${t('no_data')}</div>`;
     return;
   }
-  for (const inv of invites) {
+  for (const inv of groupInvites) {
     const item = document.createElement('div');
     item.className = 'item';
     item.innerHTML = `
-      <div><strong>${inv.name}</strong> (${inv.group_type})</div>
+      <div><strong>${inv.name}</strong> (${groupTypeLabel(inv.group_type)})</div>
       <div class="meta">${inv.invited_by || ''}</div>
       <div class="row" style="margin-top:6px">
         <button onclick="acceptInvite(${inv.group_id})">${t('accept')}</button>
@@ -4349,6 +4361,133 @@ async function loadInvites() {
       </div>`;
     box.appendChild(item);
   }
+}
+async function loadManageGroups() {
+  const approvedGroups = myGroups.filter((g) => g.status === 'approved');
+  if (!approvedGroups.length) {
+    manageGroups = [];
+    return;
+  }
+  manageGroups = await Promise.all(approvedGroups.map(async (group) => {
+    let members = [];
+    let requests = [];
+    let memberError = '';
+    let requestError = '';
+    try {
+      members = await api(`/api/groups/${group.id}/members`);
+    } catch (e) {
+      if (isAuthError(e)) throw e;
+      memberError = e.message || t('request_failed');
+    }
+    if (group.role === 'admin') {
+      try {
+        requests = await api(`/api/groups/${group.id}/requests`);
+      } catch (e) {
+        if (isAuthError(e)) throw e;
+        requestError = e.message || t('request_failed');
+      }
+    }
+    return {...group, members, requests, memberError, requestError};
+  }));
+}
+function changeManageGroup() {
+  const select = document.getElementById('manage-group-select');
+  activeManageGroupId = select && select.value ? String(select.value) : '';
+  renderManageGroupDetails();
+}
+function toggleManageActions(enabled) {
+  const inviteInput = document.getElementById('invite-username');
+  const inviteBtn = document.getElementById('invite-btn');
+  const transferInput = document.getElementById('transfer-user-id');
+  const transferBtn = document.getElementById('transfer-btn');
+  [inviteInput, inviteBtn, transferInput, transferBtn].forEach((el) => {
+    if (el) el.disabled = !enabled;
+  });
+}
+function renderManageGroupDetails() {
+  const select = document.getElementById('manage-group-select');
+  const membersBox = document.getElementById('members');
+  const requestsBox = document.getElementById('requests');
+  const manageMsg = document.getElementById('manage-msg');
+  const container = document.getElementById('manage-groups');
+  if (!select || !membersBox || !requestsBox || !manageMsg || !container) return;
+
+  select.innerHTML = '';
+  manageMsg.textContent = '';
+  manageMsg.className = 'small';
+  membersBox.innerHTML = '';
+  requestsBox.innerHTML = '';
+
+  if (!manageGroups.length) {
+    activeManageGroupId = '';
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = t('no_data');
+    select.appendChild(option);
+    select.disabled = true;
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = '';
+  select.disabled = false;
+  for (const group of manageGroups) {
+    const option = document.createElement('option');
+    option.value = String(group.id);
+    option.textContent = `${group.name} (${groupTypeLabel(group.group_type)})`;
+    select.appendChild(option);
+  }
+  if (!activeManageGroupId || !manageGroups.some((group) => String(group.id) === String(activeManageGroupId))) {
+    activeManageGroupId = String(manageGroups[0].id);
+  }
+  select.value = activeManageGroupId;
+
+  const group = manageGroups.find((item) => String(item.id) === String(activeManageGroupId));
+  if (!group) {
+    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    requestsBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    toggleManageActions(false);
+    return;
+  }
+
+  if (group.memberError) {
+    membersBox.innerHTML = `<div class="item small warn">${group.memberError}</div>`;
+  } else if (!group.members.length) {
+    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+  } else {
+    membersBox.innerHTML = group.members.map((member) => `
+      <div class="item">
+        <div><strong>${member.username}</strong> (#${member.user_id})</div>
+        <div class="meta">${roleLabel(member.role)} · ${statusLabel(member.status)}</div>
+      </div>
+    `).join('');
+  }
+
+  if (group.role !== 'admin') {
+    requestsBox.innerHTML = `<div class="item small">${t('admin_only')}</div>`;
+    toggleManageActions(false);
+    return;
+  }
+
+  toggleManageActions(true);
+  if (group.requestError) {
+    requestsBox.innerHTML = `<div class="item small warn">${group.requestError}</div>`;
+    return;
+  }
+  if (!group.requests.length) {
+    requestsBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
+    return;
+  }
+  requestsBox.innerHTML = group.requests.map((request) => `
+    <div class="item">
+      <div><strong>${request.username}</strong> (#${request.user_id})</div>
+      <div class="meta">${statusLabel(request.status)}</div>
+      <div class="row" style="margin-top:6px">
+        <button onclick="approveRequest(${group.id}, ${request.user_id})">${t('approve')}</button>
+        <button onclick="rejectRequest(${group.id}, ${request.user_id})">${t('reject')}</button>
+      </div>
+    </div>
+  `).join('');
 }
 async function createGroup() {
   const name = document.getElementById('new-group-name').value.trim();
@@ -4447,89 +4586,10 @@ async function rejectInvite(groupId) {
     alert(e.message);
   }
 }
-async function loadManageGroup() {
-  const groupIdRaw = document.getElementById('manage-group-select').value;
-  const membersBox = document.getElementById('members');
-  const reqBox = document.getElementById('requests');
-  const manageMsg = document.getElementById('manage-msg');
-  membersBox.innerHTML = '';
-  reqBox.innerHTML = '';
-  manageMsg.textContent = '';
-  manageMsg.className = 'small';
-  toggleManageActions(false);
-  if (!groupIdRaw) {
-    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-    return;
-  }
-  const selected = myGroups.find((g) => String(g.id) === String(groupIdRaw));
-  if (!selected || selected.status !== 'approved') {
-    membersBox.innerHTML = `<div class="item small">${t('not_approved')}</div>`;
-    reqBox.innerHTML = `<div class="item small">${t('not_approved')}</div>`;
-    return;
-  }
-  const groupId = Number(groupIdRaw);
-  let members = [];
-  try {
-    members = await api(`/api/groups/${groupId}/members`);
-  } catch (e) {
-    if (isAuthError(e)) {
-      location.href = '/';
-      return;
-    }
-    membersBox.innerHTML = `<div class="item small warn">${e.message}</div>`;
-    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-    return;
-  }
-  if (!members.length) {
-    membersBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-  } else {
-    for (const m of members) {
-      const item = document.createElement('div');
-      item.className = 'item';
-      item.innerHTML = `<div><strong>${m.username}</strong> (#${m.user_id})</div><div class="meta">${roleLabel(m.role)} · ${statusLabel(m.status)}</div>`;
-      membersBox.appendChild(item);
-    }
-  }
-  if (selected.role !== 'admin') {
-    reqBox.innerHTML = `<div class="item small">${t('admin_only')}</div>`;
-    manageMsg.textContent = t('admin_only');
-    manageMsg.className = 'small';
-    return;
-  }
-  toggleManageActions(true);
-  let requests = [];
-  try {
-    requests = await api(`/api/groups/${groupId}/requests`);
-  } catch (e) {
-    if (isAuthError(e)) {
-      location.href = '/';
-      return;
-    }
-    reqBox.innerHTML = `<div class="item small warn">${e.message}</div>`;
-    return;
-  }
-  if (!requests.length) {
-    reqBox.innerHTML = `<div class="item small">${t('no_data')}</div>`;
-  } else {
-    for (const r of requests) {
-      const item = document.createElement('div');
-      item.className = 'item';
-      item.innerHTML = `
-        <div><strong>${r.username}</strong> (#${r.user_id})</div>
-        <div class="meta">${statusLabel(r.status)}</div>
-        <div class="row" style="margin-top:6px">
-          <button onclick="approveRequest(${groupId}, ${r.user_id})">${t('approve')}</button>
-          <button onclick="rejectRequest(${groupId}, ${r.user_id})">${t('reject')}</button>
-        </div>`;
-      reqBox.appendChild(item);
-    }
-  }
-}
 async function approveRequest(groupId, userId) {
   try {
     await api(`/api/groups/${groupId}/requests/${userId}/approve`, {method:'POST'});
-    await loadManageGroup();
+    await refreshData();
   } catch (e) {
     if (isAuthError(e)) {
       location.href = '/';
@@ -4541,52 +4601,66 @@ async function approveRequest(groupId, userId) {
 async function rejectRequest(groupId, userId) {
   try {
     await api(`/api/groups/${groupId}/requests/${userId}/reject`, {method:'POST'});
-    await loadManageGroup();
-  } catch (e) {
-    if (isAuthError(e)) {
-      location.href = '/';
-      return;
-    }
-    alert(e.message);
-  }
-}
-async function inviteUser() {
-  const groupIdRaw = document.getElementById('manage-group-select').value;
-  if (!groupIdRaw) return;
-  const username = document.getElementById('invite-username').value.trim();
-  try {
-    await api(`/api/groups/${groupIdRaw}/invite`, {method:'POST', body: JSON.stringify({username})});
-    document.getElementById('invite-username').value = '';
-    await loadManageGroup();
-  } catch (e) {
-    if (isAuthError(e)) {
-      location.href = '/';
-      return;
-    }
-    alert(e.message);
-  }
-}
-async function transferAdmin() {
-  const groupIdRaw = document.getElementById('manage-group-select').value;
-  if (!groupIdRaw) return;
-  const new_admin_user_id = Number(document.getElementById('transfer-user-id').value);
-  if (!new_admin_user_id) return;
-  const msg = document.getElementById('manage-msg');
-  try {
-    await api(`/api/groups/${groupIdRaw}/transfer-admin`, {
-      method:'POST',
-      body: JSON.stringify({new_admin_user_id})
-    });
-    msg.textContent = t('save_ok');
-    msg.className = 'small ok';
     await refreshData();
   } catch (e) {
     if (isAuthError(e)) {
       location.href = '/';
       return;
     }
-    msg.textContent = `${t('save_fail')}: ${e.message}`;
-    msg.className = 'small warn';
+    alert(e.message);
+  }
+}
+function setManageMessage(message, kind) {
+  const box = document.getElementById('manage-msg');
+  if (!box) return;
+  box.textContent = message;
+  box.className = `small ${kind || ''}`.trim();
+}
+async function inviteUser() {
+  if (!activeManageGroupId) return;
+  const input = document.getElementById('invite-username');
+  if (!input) return;
+  const username = input.value.trim();
+  if (!username) {
+    setManageMessage(`${t('save_fail')}: ${t('invite_user')}`, 'warn');
+    return;
+  }
+  try {
+    await api(`/api/groups/${activeManageGroupId}/invite`, {method:'POST', body: JSON.stringify({username})});
+    input.value = '';
+    setManageMessage(t('save_ok'), 'ok');
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    setManageMessage(`${t('save_fail')}: ${e.message}`, 'warn');
+  }
+}
+async function transferAdmin() {
+  if (!activeManageGroupId) return;
+  const input = document.getElementById('transfer-user-id');
+  if (!input) return;
+  const new_admin_user_id = Number(input.value);
+  if (!new_admin_user_id) {
+    setManageMessage(`${t('save_fail')}: ${t('transfer_user_id')}`, 'warn');
+    return;
+  }
+  try {
+    await api(`/api/groups/${activeManageGroupId}/transfer-admin`, {
+      method:'POST',
+      body: JSON.stringify({new_admin_user_id})
+    });
+    input.value = '';
+    setManageMessage(t('save_ok'), 'ok');
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    setManageMessage(`${t('save_fail')}: ${e.message}`, 'warn');
   }
 }
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
@@ -5746,5 +5820,3 @@ function gotoAdmin() { location.href = '/admin'; }
 </body>
 </html>
 """
-
-

@@ -54,6 +54,12 @@ def _login_admin(client: TestClient) -> dict[str, str]:
     return {"X-CSRF-Token": _fetch_csrf(client)}
 
 
+def _current_user_id(client: TestClient) -> int:
+    res = client.get("/api/me")
+    assert res.status_code == 200, res.text
+    return int(res.json()["id"])
+
+
 def test_csrf_rejects_mutation_without_token(webapp_module):
     with TestClient(webapp_module.app) as client:
         _login_admin(client)
@@ -371,6 +377,240 @@ def test_group_member_can_leave_group(webapp_module):
         mine_res = member_client.get("/api/groups/mine")
         assert mine_res.status_code == 200, mine_res.text
         assert all(item["id"] != group_id for item in mine_res.json())
+
+
+def test_group_admin_can_invite_user_and_user_can_accept_invite(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as invited_client:
+        owner_headers = _register(owner_client, "invite_owner_user")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Invite Accept Group", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        invited_headers = _register(invited_client, "invite_target_user")
+        invite_res = owner_client.post(
+            f"/api/groups/{group_id}/invite",
+            json={"username": "invite_target_user"},
+            headers=owner_headers,
+        )
+        assert invite_res.status_code == 200, invite_res.text
+        assert invite_res.json()["status"] == "invited"
+
+        members_before_accept = owner_client.get(f"/api/groups/{group_id}/members")
+        assert members_before_accept.status_code == 200, members_before_accept.text
+        assert all(item["username"] != "invite_target_user" for item in members_before_accept.json())
+
+        requests_before_accept = owner_client.get(f"/api/groups/{group_id}/requests")
+        assert requests_before_accept.status_code == 200, requests_before_accept.text
+        assert all(item["username"] != "invite_target_user" for item in requests_before_accept.json())
+
+        approve_invite_res = owner_client.post(
+            f"/api/groups/{group_id}/requests/{_current_user_id(invited_client)}/approve",
+            headers=owner_headers,
+        )
+        assert approve_invite_res.status_code == 400, approve_invite_res.text
+        assert "Only pending join requests can be approved" in approve_invite_res.text
+
+        invites_res = invited_client.get("/api/groups/invitations")
+        assert invites_res.status_code == 200, invites_res.text
+        invites = invites_res.json()
+        assert any(item["group_id"] == group_id for item in invites)
+
+        accept_res = invited_client.post(
+            f"/api/groups/{group_id}/invitations/accept",
+            headers=invited_headers,
+        )
+        assert accept_res.status_code == 200, accept_res.text
+        assert accept_res.json()["status"] == "approved"
+
+        mine_res = invited_client.get("/api/groups/mine")
+        assert mine_res.status_code == 200, mine_res.text
+        group_row = next((item for item in mine_res.json() if item["id"] == group_id), None)
+        assert group_row is not None
+        assert group_row["role"] == "member"
+        assert group_row["status"] == "approved"
+
+        members_res = owner_client.get(f"/api/groups/{group_id}/members")
+        assert members_res.status_code == 200, members_res.text
+        usernames = {item["username"] for item in members_res.json()}
+        assert "invite_owner_user" in usernames
+        assert "invite_target_user" in usernames
+
+
+def test_group_invite_can_be_rejected(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as invited_client:
+        owner_headers = _register(owner_client, "invite_reject_owner")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Invite Reject Group", "group_type": "company"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        invited_headers = _register(invited_client, "invite_reject_target")
+        invite_res = owner_client.post(
+            f"/api/groups/{group_id}/invite",
+            json={"username": "invite_reject_target"},
+            headers=owner_headers,
+        )
+        assert invite_res.status_code == 200, invite_res.text
+
+        requests_res = owner_client.get(f"/api/groups/{group_id}/requests")
+        assert requests_res.status_code == 200, requests_res.text
+        assert all(item["username"] != "invite_reject_target" for item in requests_res.json())
+
+        reject_res = invited_client.post(
+            f"/api/groups/{group_id}/invitations/reject",
+            headers=invited_headers,
+        )
+        assert reject_res.status_code == 200, reject_res.text
+
+        invites_res = invited_client.get("/api/groups/invitations")
+        assert invites_res.status_code == 200, invites_res.text
+        assert all(item["group_id"] != group_id for item in invites_res.json())
+
+        members_res = owner_client.get(f"/api/groups/{group_id}/members")
+        assert members_res.status_code == 200, members_res.text
+        assert all(item["username"] != "invite_reject_target" for item in members_res.json())
+
+
+def test_only_group_admin_can_invite_users(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as member_client, TestClient(webapp_module.app) as target_client:
+        owner_headers = _register(owner_client, "invite_perm_owner")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Invite Permission Group", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        member_headers = _register(member_client, "invite_perm_member")
+        _register(target_client, "invite_perm_target")
+        member_id = _current_user_id(member_client)
+
+        join_res = member_client.post(f"/api/groups/{group_id}/join", headers=member_headers)
+        assert join_res.status_code == 200, join_res.text
+
+        approve_res = owner_client.post(
+            f"/api/groups/{group_id}/requests/{member_id}/approve",
+            headers=owner_headers,
+        )
+        assert approve_res.status_code == 200, approve_res.text
+
+        invite_res = member_client.post(
+            f"/api/groups/{group_id}/invite",
+            json={"username": "invite_perm_target"},
+            headers=member_headers,
+        )
+        assert invite_res.status_code == 403, invite_res.text
+        assert "Admin only for this group" in invite_res.text
+
+
+def test_transfer_admin_updates_group_roles_and_permissions(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as member_client, TestClient(webapp_module.app) as target_client:
+        owner_headers = _register(owner_client, "transfer_owner_user")
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Transfer Admin Group", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        member_headers = _register(member_client, "transfer_member_user")
+        _register(target_client, "transfer_target_user")
+        member_id = _current_user_id(member_client)
+
+        join_res = member_client.post(f"/api/groups/{group_id}/join", headers=member_headers)
+        assert join_res.status_code == 200, join_res.text
+        approve_res = owner_client.post(
+            f"/api/groups/{group_id}/requests/{member_id}/approve",
+            headers=owner_headers,
+        )
+        assert approve_res.status_code == 200, approve_res.text
+
+        transfer_res = owner_client.post(
+            f"/api/groups/{group_id}/transfer-admin",
+            json={"new_admin_user_id": member_id},
+            headers=owner_headers,
+        )
+        assert transfer_res.status_code == 200, transfer_res.text
+        assert transfer_res.json()["new_admin_user_id"] == member_id
+
+        members_res = owner_client.get(f"/api/groups/{group_id}/members")
+        assert members_res.status_code == 200, members_res.text
+        roles = {item["username"]: item["role"] for item in members_res.json()}
+        assert roles["transfer_owner_user"] == "member"
+        assert roles["transfer_member_user"] == "admin"
+
+        old_admin_invite = owner_client.post(
+            f"/api/groups/{group_id}/invite",
+            json={"username": "transfer_target_user"},
+            headers=owner_headers,
+        )
+        assert old_admin_invite.status_code == 403, old_admin_invite.text
+
+        new_admin_invite = member_client.post(
+            f"/api/groups/{group_id}/invite",
+            json={"username": "transfer_target_user"},
+            headers=member_headers,
+        )
+        assert new_admin_invite.status_code == 200, new_admin_invite.text
+        assert new_admin_invite.json()["status"] == "invited"
+
+
+def test_group_members_are_scoped_per_group(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as alpha_client, TestClient(webapp_module.app) as beta_client:
+        owner_headers = _register(owner_client, "scoped_group_owner")
+        alpha_headers = _register(alpha_client, "scoped_alpha_user")
+        beta_headers = _register(beta_client, "scoped_beta_user")
+        alpha_id = _current_user_id(alpha_client)
+        beta_id = _current_user_id(beta_client)
+
+        group_a_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Scoped Alpha Group", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert group_a_res.status_code == 200, group_a_res.text
+        group_a_id = group_a_res.json()["id"]
+
+        group_b_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Scoped Beta Group", "group_type": "company"},
+            headers=owner_headers,
+        )
+        assert group_b_res.status_code == 200, group_b_res.text
+        group_b_id = group_b_res.json()["id"]
+
+        assert alpha_client.post(f"/api/groups/{group_a_id}/join", headers=alpha_headers).status_code == 200
+        assert beta_client.post(f"/api/groups/{group_b_id}/join", headers=beta_headers).status_code == 200
+
+        assert owner_client.post(
+            f"/api/groups/{group_a_id}/requests/{alpha_id}/approve",
+            headers=owner_headers,
+        ).status_code == 200
+        assert owner_client.post(
+            f"/api/groups/{group_b_id}/requests/{beta_id}/approve",
+            headers=owner_headers,
+        ).status_code == 200
+
+        members_a_res = owner_client.get(f"/api/groups/{group_a_id}/members")
+        members_b_res = owner_client.get(f"/api/groups/{group_b_id}/members")
+        assert members_a_res.status_code == 200, members_a_res.text
+        assert members_b_res.status_code == 200, members_b_res.text
+
+        usernames_a = {item["username"] for item in members_a_res.json()}
+        usernames_b = {item["username"] for item in members_b_res.json()}
+        assert "scoped_alpha_user" in usernames_a
+        assert "scoped_beta_user" not in usernames_a
+        assert "scoped_beta_user" in usernames_b
+        assert "scoped_alpha_user" not in usernames_b
 
 
 def test_last_group_admin_cannot_leave_group(webapp_module):

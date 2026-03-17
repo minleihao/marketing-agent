@@ -1303,7 +1303,7 @@ def list_group_members(group_id: int, request: Request) -> Any:
             SELECT gm.user_id, u.username, gm.role, gm.status, gm.created_at, gm.approved_at
             FROM group_memberships gm
             JOIN users u ON u.id = gm.user_id
-            WHERE gm.group_id = ?
+            WHERE gm.group_id = ? AND gm.status = 'approved'
             ORDER BY CASE gm.role WHEN 'admin' THEN 0 ELSE 1 END, LOWER(u.username) ASC
             """,
             (group_id,),
@@ -1323,7 +1323,7 @@ def list_group_requests(group_id: int, request: Request) -> Any:
             FROM group_memberships gm
             JOIN users u ON u.id = gm.user_id
             LEFT JOIN users ru ON ru.id = gm.requested_by
-            WHERE gm.group_id = ? AND gm.status IN ('pending', 'invited')
+            WHERE gm.group_id = ? AND gm.status = 'pending'
             ORDER BY gm.created_at ASC
             """,
             (group_id,),
@@ -1344,6 +1344,8 @@ def approve_group_request(group_id: int, member_user_id: int, request: Request) 
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Membership request not found")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=400, detail="Only pending join requests can be approved")
         conn.execute(
             "UPDATE group_memberships SET status = 'approved', approved_at = ? WHERE group_id = ? AND user_id = ?",
             (now, group_id, member_user_id),
@@ -1363,8 +1365,8 @@ def reject_group_request(group_id: int, member_user_id: int, request: Request) -
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Membership request not found")
-        if row["status"] == "approved":
-            raise HTTPException(status_code=400, detail="Cannot reject an approved member")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=400, detail="Only pending join requests can be rejected")
         conn.execute(
             "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
             (group_id, member_user_id),
