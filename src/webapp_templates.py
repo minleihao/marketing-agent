@@ -2,7 +2,7 @@
 
 AUTH_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -45,10 +45,6 @@ AUTH_HTML = """
   </style>
 </head>
 <body>
-  <div class="lang">
-    <button id="lang-zh" onclick="setLang('zh')">中文</button>
-    <button id="lang-en" onclick="setLang('en')">EN</button>
-  </div>
   <div class="wrap">
     <div class="card">
       <h2 data-i18n="login_title">登录</h2>
@@ -57,7 +53,6 @@ AUTH_HTML = """
       <input id="login-password" data-i18n-placeholder="password" placeholder="密码" type="password" />
       <button onclick="login()" data-i18n="login_btn">登录</button>
       <div id="login-err" class="err"></div>
-      <div class="note" data-i18n="default_admin">首次可用默认管理员账号：admin / admin123456</div>
     </div>
     <div class="card">
       <h2 data-i18n="register_title">注册</h2>
@@ -102,7 +97,6 @@ const I18N = {
     password: '密码',
     reg_username: '用户名（3-32 位）',
     reg_password: '密码（至少 8 位）',
-    default_admin: '首次可用默认管理员账号：admin / admin123456',
     login_failed: '登录失败',
     invalid_credentials: '用户名或密码错误',
     account_disabled: '账号已被禁用',
@@ -128,7 +122,6 @@ const I18N = {
     password: 'Password',
     reg_username: 'Username (3-32 chars)',
     reg_password: 'Password (at least 8 chars)',
-    default_admin: 'Default admin account: admin / admin123456',
     login_failed: 'Login failed',
     invalid_credentials: 'Invalid username or password',
     account_disabled: 'This account is disabled',
@@ -136,7 +129,7 @@ const I18N = {
   }
 };
 
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let csrfToken = '';
 let publicGroups = [];
 
@@ -176,16 +169,14 @@ function renderPublicGroups() {
 
 function applyI18n() {
   document.title = t('page_title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
   renderPublicGroups();
 }
 
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
 }
@@ -258,7 +249,7 @@ loadPublicGroups();
 
 APP_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -1044,10 +1035,6 @@ APP_HTML = """
         <div class="global-title" data-i18n="app_brand">Marketing Copilot</div>
       </div>
       <div class="global-actions">
-        <div class="lang">
-          <button class="btn" id="lang-zh" onclick="setLang('zh')">中文</button>
-          <button class="btn" id="lang-en" onclick="setLang('en')">EN</button>
-        </div>
         <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
         <button class="btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button class="btn" onclick="changePassword()" data-i18n="change_password">修改密码</button>
@@ -1541,7 +1528,7 @@ let activeConversationId = null;
 let activeDocuments = [];
 let suppressKBChange = false;
 let editingConversationId = null;
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let csrfToken = '';
 let activeMessages = [];
 let orchestratorRuns = [];
@@ -1597,7 +1584,7 @@ function t(key) {
 }
 
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
 }
@@ -1719,11 +1706,9 @@ function bindSidebarResizer() {
 
 function applyI18n() {
   document.title = t('page_title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
   if (!activeConversationId) {
     document.getElementById('chat-title').textContent = t('no_conversation');
   } else {
@@ -3298,7 +3283,7 @@ function gotoExperiments() { location.href = '/experiments'; }
 
 KB_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -3511,10 +3496,6 @@ KB_HTML = """
     <div class="top">
       <h2 data-i18n="title">Knowledge Base 管理</h2>
       <div class="toolbar">
-        <div class="lang">
-          <button id="lang-zh" onclick="setLang('zh')">中文</button>
-          <button id="lang-en" onclick="setLang('en')">EN</button>
-        </div>
         <div class="top-tabs">
           <button class="tab-btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
           <button class="tab-btn" onclick="backToApp()" data-i18n="back">返回聊天</button>
@@ -3679,7 +3660,7 @@ const I18N = {
   }
 };
 
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let kbList = [];
 let kbVersions = [];
 let myGroups = [];
@@ -3694,17 +3675,15 @@ function setMsg(text, isWarn=false) {
 }
 function applyI18n() {
   document.title = t('title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
   renderGroupSelect();
   renderKBList();
   renderKBKeySelect();
   renderVersionSelect();
 }
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
 }
@@ -3983,7 +3962,7 @@ function gotoExperiments() { location.href = '/experiments'; }
 
 GROUPS_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -4040,8 +4019,6 @@ GROUPS_HTML = """
     <div class="top">
       <h2 data-i18n="title">组管理</h2>
       <div class="toolbar">
-        <button id="lang-zh" onclick="setLang('zh')">中文</button>
-        <button id="lang-en" onclick="setLang('en')">EN</button>
         <button onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button onclick="backToApp()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
@@ -4199,7 +4176,7 @@ const I18N = {
   }
 };
 
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let me = null;
 let myGroups = [];
 let allGroups = [];
@@ -4210,18 +4187,16 @@ let csrfToken = '';
 
 function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
   renderAll();
 }
 function applyI18n() {
   document.title = t('title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
 }
 async function api(url, options={}) {
   const method = (options.method || 'GET').toUpperCase();
@@ -4688,7 +4663,7 @@ function gotoExperiments() { location.href = '/experiments'; }
 
 ADMIN_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -4803,8 +4778,6 @@ ADMIN_HTML = """
     <div class="top">
       <h2 data-i18n="title">用户管理</h2>
       <div class="toolbar">
-        <button id="lang-zh" onclick="setLang('zh')">中文</button>
-        <button id="lang-en" onclick="setLang('en')">EN</button>
         <button onclick="gotoExperiments()" data-i18n="experiments_nav">Experiments</button>
         <button onclick="back()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
@@ -4911,7 +4884,7 @@ const I18N = {
   }
 };
 
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let csrfToken = '';
 
 function t(key) {
@@ -4920,15 +4893,13 @@ function t(key) {
 
 function applyI18n() {
   document.title = t('page_title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
 }
 
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
   loadUsers();
@@ -5025,7 +4996,7 @@ function gotoExperiments() { location.href = '/experiments'; }
 
 EXPERIMENTS_HTML = """
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -5258,10 +5229,6 @@ EXPERIMENTS_HTML = """
     <div class="top">
       <h2 data-i18n="title">实验中心</h2>
       <div class="toolbar">
-        <div class="lang">
-          <button id="lang-zh" onclick="setLang('zh')">中文</button>
-          <button id="lang-en" onclick="setLang('en')">EN</button>
-        </div>
         <div class="top-tabs">
           <button class="tab-btn" onclick="gotoApp()" data-i18n="back">返回聊天</button>
           <button class="tab-btn" onclick="gotoKB()" data-i18n="kb_nav">Knowledge Base 管理</button>
@@ -5457,7 +5424,7 @@ const I18N = {
   }
 };
 
-let currentLang = localStorage.getItem('nova_lang') || 'zh';
+let currentLang = 'en';
 let csrfToken = '';
 let me = null;
 let conversations = [];
@@ -5497,7 +5464,7 @@ function pretty(value) {
 }
 
 function setLang(lang) {
-  currentLang = lang === 'en' ? 'en' : 'zh';
+  currentLang = 'en';
   localStorage.setItem('nova_lang', currentLang);
   applyI18n();
   renderConversationSelect();
@@ -5507,10 +5474,8 @@ function setLang(lang) {
 
 function applyI18n() {
   document.title = t('title');
-  document.documentElement.lang = currentLang === 'en' ? 'en' : 'zh-CN';
+  document.documentElement.lang = 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  document.getElementById('lang-zh').classList.toggle('active', currentLang === 'zh');
-  document.getElementById('lang-en').classList.toggle('active', currentLang === 'en');
 }
 
 async function api(url, options={}) {
