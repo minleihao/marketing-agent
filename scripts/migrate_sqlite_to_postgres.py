@@ -27,8 +27,6 @@ TABLE_ORDER = [
     "conversation_memories",
     "orchestrator_runs",
     "login_attempts",
-    "experiments",
-    "experiment_variants",
 ]
 
 TABLES_WITH_ID_SEQUENCE = [
@@ -42,8 +40,6 @@ TABLES_WITH_ID_SEQUENCE = [
     "groups",
     "orchestrator_runs",
     "login_attempts",
-    "experiments",
-    "experiment_variants",
 ]
 
 

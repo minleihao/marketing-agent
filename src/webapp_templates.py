@@ -4094,6 +4094,7 @@ const I18N = {
     requests: '待审批请求',
     invite_user: '邀请用户名',
     invite: '邀请',
+    remove_member: '移除成员',
     transfer_user_id: '新管理员 user_id',
     transfer_admin: '转移管理员',
     join: '申请加入',
@@ -4117,8 +4118,10 @@ const I18N = {
     admin_only: '仅组管理员可查看审批请求并执行管理操作',
     confirm_leave_group: '确认退出这个组吗？',
     confirm_delete_group: '确认解散这个组吗？该组共享内容会转为私有。',
+    confirm_remove_member: '确认将该成员移出组吗？',
     left_group: '已退出组',
-    deleted_group: '组已解散'
+    deleted_group: '组已解散',
+    member_removed: '成员已移除'
   },
   en: {
     title: 'Group Management',
@@ -4137,6 +4140,7 @@ const I18N = {
     requests: 'Pending Requests',
     invite_user: 'Username to invite',
     invite: 'Invite',
+    remove_member: 'Remove Member',
     transfer_user_id: 'New admin user_id',
     transfer_admin: 'Transfer Admin',
     join: 'Request Join',
@@ -4160,8 +4164,10 @@ const I18N = {
     admin_only: 'Only group admins can review requests and run management actions.',
     confirm_leave_group: 'Leave this group?',
     confirm_delete_group: 'Delete this group? Shared content under this group will become private.',
+    confirm_remove_member: 'Remove this member from the group?',
     left_group: 'You left the group.',
-    deleted_group: 'Group deleted.'
+    deleted_group: 'Group deleted.',
+    member_removed: 'Member removed.'
   }
 };
 
@@ -4238,6 +4244,14 @@ function groupTypeLabel(groupType) {
 function canDeleteGroup(group) {
   if (!group || !me) return false;
   return Boolean(me.is_admin || (group.role === 'admin' && group.status === 'approved'));
+}
+function canManageGroup(group) {
+  if (!group || !me) return false;
+  return Boolean(me.is_admin || (group.role === 'admin' && group.status === 'approved'));
+}
+function canRemoveMember(group, member) {
+  if (!canManageGroup(group) || !member || !me) return false;
+  return Number(member.user_id) !== Number(me.id);
 }
 function renderAll() {
   renderMyGroups();
@@ -4327,12 +4341,14 @@ function renderInvites() {
   }
 }
 async function loadManageGroups() {
-  const approvedGroups = myGroups.filter((g) => g.status === 'approved');
-  if (!approvedGroups.length) {
+  const sourceGroups = (me && me.is_admin)
+    ? allGroups.map((g) => ({...g, role: g.role || g.my_role || null, status: g.status || g.my_status || null}))
+    : myGroups.filter((g) => g.status === 'approved');
+  if (!sourceGroups.length) {
     manageGroups = [];
     return;
   }
-  manageGroups = await Promise.all(approvedGroups.map(async (group) => {
+  manageGroups = await Promise.all(sourceGroups.map(async (group) => {
     let members = [];
     let requests = [];
     let memberError = '';
@@ -4343,7 +4359,7 @@ async function loadManageGroups() {
       if (isAuthError(e)) throw e;
       memberError = e.message || t('request_failed');
     }
-    if (group.role === 'admin') {
+    if (canManageGroup(group)) {
       try {
         requests = await api(`/api/groups/${group.id}/requests`);
       } catch (e) {
@@ -4423,11 +4439,12 @@ function renderManageGroupDetails() {
       <div class="item">
         <div><strong>${member.username}</strong> (#${member.user_id})</div>
         <div class="meta">${roleLabel(member.role)} · ${statusLabel(member.status)}</div>
+        ${canRemoveMember(group, member) ? `<div class="row" style="margin-top:6px"><button class="danger" onclick="removeMember(${group.id}, ${member.user_id})">${t('remove_member')}</button></div>` : ''}
       </div>
     `).join('');
   }
 
-  if (group.role !== 'admin') {
+  if (!canManageGroup(group)) {
     requestsBox.innerHTML = `<div class="item small">${t('admin_only')}</div>`;
     toggleManageActions(false);
     return;
@@ -4618,6 +4635,20 @@ async function transferAdmin() {
     });
     input.value = '';
     setManageMessage(t('save_ok'), 'ok');
+    await refreshData();
+  } catch (e) {
+    if (isAuthError(e)) {
+      location.href = '/';
+      return;
+    }
+    setManageMessage(`${t('save_fail')}: ${e.message}`, 'warn');
+  }
+}
+async function removeMember(groupId, userId) {
+  if (!confirm(t('confirm_remove_member'))) return;
+  try {
+    await api(`/api/groups/${groupId}/members/${userId}`, {method:'DELETE'});
+    setManageMessage(t('member_removed'), 'ok');
     await refreshData();
   } catch (e) {
     if (isAuthError(e)) {

@@ -32,7 +32,7 @@ agents:
     bedrock_agentcore:
       agent_id: novaRed_Agent-h7dTUU4TPS
       agent_arn: arn:aws:bedrock-agentcore:us-east-2:631195140215:runtime/novaRed_Agent-h7dTUU4TPS
-      agent_session_id: b657500f-7fb7-47c1-af58-a3426ef76a12
+      agent_session_id: 639892d3-cc3b-4e2e-980f-ade95ffd53cc
     codebuild:
       project_name: null
       execution_role: null
