@@ -105,29 +105,6 @@ class GroupTransferAdminInput(BaseModel):
     new_admin_user_id: int
 
 
-class ExperimentCreateInput(BaseModel):
-    title: str = Field(min_length=1, max_length=160)
-    hypothesis: str = Field(min_length=1, max_length=2000)
-    conversation_id: int | None = None
-    traffic_allocation: Any = Field(default_factory=dict)
-
-
-class ExperimentVariantInput(BaseModel):
-    variant_key: str = Field(min_length=1, max_length=40)
-    content: str = Field(min_length=1, max_length=10000)
-
-
-class ExperimentStatusInput(BaseModel):
-    status: str = Field(min_length=1, max_length=40)
-    result: Any = Field(default_factory=dict)
-
-
-class ExperimentUpdateInput(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=160)
-    hypothesis: str | None = Field(default=None, min_length=1, max_length=2000)
-    traffic_allocation: Any | None = None
-
-
 class BrandKBUpdateInput(BaseModel):
     kb_name: str | None = Field(default=None, max_length=120)
     brand_voice: str | None = Field(default=None, max_length=500)

@@ -5,9 +5,9 @@ Marketing Copilot is a FastAPI web application for multi-user marketing collabor
 - conversation history and per-conversation model settings
 - shared, versioned Knowledge Base management
 - group-based access control (`private`, `task`, `company`)
-- experiment tracking linked to conversations
 - document upload and retrieval context support
-- bilingual UI (English / Chinese)
+- default shared system resources for the `General Group`
+- English-only UI
 
 ## Tech Stack
 - Backend: FastAPI
@@ -65,4 +65,6 @@ uv run pytest -q test/test_main.py test/test_webapp.py
 ## Notes
 - Group and visibility permissions are enforced server-side for conversations and Knowledge Base entries.
 - Shared content is separated from user-owned content in UI and API responses.
+- Every registered user is auto-added to `General Group`.
+- `admin` owns the protected `General Group`, two default shared Knowledge Base entries, and seeded sample shared conversations.
 - Keep schema changes backward compatible; existing instances may already have production data.

@@ -29,6 +29,7 @@ from db_backend import (
     verify_password,
 )
 from db_schema import init_db as initialize_db
+from db_schema import GENERAL_GROUP_NAME, GENERAL_GROUP_TYPE
 from model.load import DEFAULT_MODEL_ID
 from webapp_schemas import (
     AccountPasswordInput,
@@ -44,10 +45,6 @@ from webapp_schemas import (
     ConversationThinkingDepthInput,
     ConversationTitleInput,
     ConversationVisibilityInput,
-    ExperimentCreateInput,
-    ExperimentStatusInput,
-    ExperimentUpdateInput,
-    ExperimentVariantInput,
     GroupCreateInput,
     GroupInviteInput,
     GroupTransferAdminInput,
@@ -55,7 +52,7 @@ from webapp_schemas import (
     MessageInput,
     RegisterInput,
 )
-from webapp_templates import ADMIN_HTML, APP_HTML, AUTH_HTML, EXPERIMENTS_HTML, GROUPS_HTML, KB_HTML
+from webapp_templates import ADMIN_HTML, APP_HTML, AUTH_HTML, GROUPS_HTML, KB_HTML
 
 
 def _load_runtime_functions() -> tuple[Any, Any | None]:
@@ -115,6 +112,12 @@ ENFORCE_DEFAULT_ADMIN_PASSWORD_CHANGE = os.getenv("NOVARED_ENFORCE_DEFAULT_ADMIN
     "true",
     "True",
 }
+
+
+def _is_general_group_row(group_row: Any | None) -> bool:
+    if not group_row:
+        return False
+    return (group_row["name"] or "") == GENERAL_GROUP_NAME and (group_row["group_type"] or "") == GENERAL_GROUP_TYPE
 
 
 def init_db() -> None:
@@ -325,6 +328,22 @@ def _is_group_admin(user_id: int, group_id: int) -> bool:
             (group_id, user_id),
         ).fetchone()
     return bool(row)
+
+
+def _ensure_group_viewer_or_system_admin(user: sqlite3.Row, group_id: int) -> None:
+    if user["is_admin"] != 0:
+        return
+    if _is_group_member(user["id"], group_id, approved_only=True):
+        return
+    raise HTTPException(status_code=403, detail="No access to this group")
+
+
+def _ensure_group_admin_or_system_admin(user: sqlite3.Row, group_id: int) -> None:
+    if user["is_admin"] != 0:
+        return
+    if _is_group_admin(user["id"], group_id):
+        return
+    raise HTTPException(status_code=403, detail="Admin only for this group")
 
 
 def _validate_share_group_for_user(user_id: int, visibility: str, share_group_id: int | None) -> tuple[str, int | None]:
@@ -897,6 +916,28 @@ def register(body: RegisterInput) -> Any:
                 (username, salt, pwd_hash, now_utc().isoformat()),
             )
             user_id = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()["id"]
+            general_group_row = conn.execute(
+                "SELECT id FROM groups WHERE name = ? AND group_type = ?",
+                (GENERAL_GROUP_NAME, GENERAL_GROUP_TYPE),
+            ).fetchone()
+            general_group_id = int(general_group_row["id"]) if general_group_row else None
+            admin_row = conn.execute("SELECT id FROM users WHERE username = ?", (DEFAULT_ADMIN_USER,)).fetchone()
+            default_admin_id = int(admin_row["id"]) if admin_row else user_id
+            if general_group_id:
+                requested_group_ids = [gid for gid in requested_group_ids if gid != general_group_id]
+                existing_general = conn.execute(
+                    "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
+                    (general_group_id, user_id),
+                ).fetchone()
+                if not existing_general:
+                    approved_at = now_utc().isoformat()
+                    conn.execute(
+                        """
+                        INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at, approved_at)
+                        VALUES (?, ?, 'member', 'approved', ?, ?, ?)
+                        """,
+                        (general_group_id, user_id, default_admin_id, approved_at, approved_at),
+                    )
             if requested_group_ids:
                 created_at = now_utc().isoformat()
                 conn.executemany(
@@ -986,13 +1027,6 @@ def groups_page(request: Request) -> Any:
     return _html_response(GROUPS_HTML)
 
 
-@app.get("/experiments", response_class=HTMLResponse)
-def experiments_page(request: Request) -> Any:
-    if not current_user(request):
-        return RedirectResponse(url="/", status_code=302)
-    return _html_response(EXPERIMENTS_HTML)
-
-
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request) -> Any:
     user = current_user(request)
@@ -1052,6 +1086,7 @@ def list_public_groups() -> Any:
                        WHERE x.group_id = g.id AND x.status = 'approved'
                    ) AS approved_member_count
             FROM groups g
+            WHERE NOT (g.name = ? AND g.group_type = ?)
                 ORDER BY
                     CASE g.group_type
                         WHEN 'company' THEN 0
@@ -1059,6 +1094,8 @@ def list_public_groups() -> Any:
                     END,
                     LOWER(g.name) ASC
             """
+            ,
+            (GENERAL_GROUP_NAME, GENERAL_GROUP_TYPE),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -1179,9 +1216,10 @@ def request_group_join(group_id: int, request: Request) -> Any:
     user = must_login(request)
     now = now_utc().isoformat()
     with db_conn() as conn:
-        group_row = conn.execute("SELECT id FROM groups WHERE id = ?", (group_id,)).fetchone()
+        group_row = conn.execute("SELECT id, name, group_type FROM groups WHERE id = ?", (group_id,)).fetchone()
         if not group_row:
             raise HTTPException(status_code=404, detail="Group not found")
+        auto_approve = _is_general_group_row(group_row)
         existing = conn.execute(
             "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
             (group_id, user["id"]),
@@ -1190,6 +1228,16 @@ def request_group_join(group_id: int, request: Request) -> Any:
             status = existing["status"]
             if status == "approved":
                 return {"ok": True, "status": "approved"}
+            if auto_approve:
+                conn.execute(
+                    """
+                    UPDATE group_memberships
+                    SET status = 'approved', requested_by = ?, created_at = ?, approved_at = ?
+                    WHERE group_id = ? AND user_id = ?
+                    """,
+                    (user["id"], now, now, group_id, user["id"]),
+                )
+                return {"ok": True, "status": "approved"}
             if status in {"pending", "invited"}:
                 return {"ok": True, "status": status}
             conn.execute(
@@ -1197,6 +1245,15 @@ def request_group_join(group_id: int, request: Request) -> Any:
                 (user["id"], now, group_id, user["id"]),
             )
             return {"ok": True, "status": "pending"}
+        if auto_approve:
+            conn.execute(
+                """
+                INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at, approved_at)
+                VALUES (?, ?, 'member', 'approved', ?, ?, ?)
+                """,
+                (group_id, user["id"], user["id"], now, now),
+            )
+            return {"ok": True, "status": "approved"}
         conn.execute(
             """
             INSERT INTO group_memberships (group_id, user_id, role, status, requested_by, created_at)
@@ -1237,10 +1294,20 @@ def leave_group(group_id: int, request: Request) -> Any:
                     status_code=400,
                     detail="Cannot leave group as the last admin. Transfer admin or delete the group.",
                 )
-        conn.execute(
-            "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
-            (group_id, user["id"]),
-        )
+        if _is_general_group_row(group_row):
+            conn.execute(
+                """
+                UPDATE group_memberships
+                SET status = 'left', approved_at = NULL
+                WHERE group_id = ? AND user_id = ?
+                """,
+                (group_id, user["id"]),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
+                (group_id, user["id"]),
+            )
     return {"ok": True, "group_id": group_id}
 
 
@@ -1255,6 +1322,8 @@ def delete_group(group_id: int, request: Request) -> Any:
         ).fetchone()
         if not group_row:
             raise HTTPException(status_code=404, detail="Group not found")
+        if _is_general_group_row(group_row):
+            raise HTTPException(status_code=400, detail="General Group is protected and cannot be deleted")
         if user["is_admin"] == 0:
             admin_row = conn.execute(
                 """
@@ -1295,8 +1364,7 @@ def delete_group(group_id: int, request: Request) -> Any:
 @app.get("/api/groups/{group_id}/members")
 def list_group_members(group_id: int, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_member(user["id"], group_id, approved_only=True):
-        raise HTTPException(status_code=403, detail="No access to this group")
+    _ensure_group_viewer_or_system_admin(user, group_id)
     with db_conn() as conn:
         rows = conn.execute(
             """
@@ -1314,8 +1382,7 @@ def list_group_members(group_id: int, request: Request) -> Any:
 @app.get("/api/groups/{group_id}/requests")
 def list_group_requests(group_id: int, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_admin(user["id"], group_id):
-        raise HTTPException(status_code=403, detail="Admin only for this group")
+    _ensure_group_admin_or_system_admin(user, group_id)
     with db_conn() as conn:
         rows = conn.execute(
             """
@@ -1334,8 +1401,7 @@ def list_group_requests(group_id: int, request: Request) -> Any:
 @app.post("/api/groups/{group_id}/requests/{member_user_id}/approve")
 def approve_group_request(group_id: int, member_user_id: int, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_admin(user["id"], group_id):
-        raise HTTPException(status_code=403, detail="Admin only for this group")
+    _ensure_group_admin_or_system_admin(user, group_id)
     now = now_utc().isoformat()
     with db_conn() as conn:
         row = conn.execute(
@@ -1356,8 +1422,7 @@ def approve_group_request(group_id: int, member_user_id: int, request: Request) 
 @app.post("/api/groups/{group_id}/requests/{member_user_id}/reject")
 def reject_group_request(group_id: int, member_user_id: int, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_admin(user["id"], group_id):
-        raise HTTPException(status_code=403, detail="Admin only for this group")
+    _ensure_group_admin_or_system_admin(user, group_id)
     with db_conn() as conn:
         row = conn.execute(
             "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
@@ -1377,8 +1442,7 @@ def reject_group_request(group_id: int, member_user_id: int, request: Request) -
 @app.post("/api/groups/{group_id}/invite")
 def invite_user_to_group(group_id: int, body: GroupInviteInput, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_admin(user["id"], group_id):
-        raise HTTPException(status_code=403, detail="Admin only for this group")
+    _ensure_group_admin_or_system_admin(user, group_id)
     username = body.username.strip()
     now = now_utc().isoformat()
     with db_conn() as conn:
@@ -1446,10 +1510,17 @@ def reject_group_invite(group_id: int, request: Request) -> Any:
 @app.post("/api/groups/{group_id}/transfer-admin")
 def transfer_group_admin(group_id: int, body: GroupTransferAdminInput, request: Request) -> Any:
     user = must_login(request)
-    if not _is_group_admin(user["id"], group_id):
-        raise HTTPException(status_code=403, detail="Admin only for this group")
+    _ensure_group_admin_or_system_admin(user, group_id)
     new_admin_id = body.new_admin_user_id
     with db_conn() as conn:
+        group_row = conn.execute(
+            "SELECT id, name, group_type FROM groups WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+        if _is_general_group_row(group_row):
+            raise HTTPException(status_code=400, detail="General Group admin is fixed to admin")
         target = conn.execute(
             "SELECT status FROM group_memberships WHERE group_id = ? AND user_id = ?",
             (group_id, new_admin_id),
@@ -1467,206 +1538,58 @@ def transfer_group_admin(group_id: int, body: GroupTransferAdminInput, request: 
     return {"ok": True, "new_admin_user_id": new_admin_id}
 
 
-@app.get("/api/experiments")
-def list_experiments(request: Request) -> Any:
+@app.delete("/api/groups/{group_id}/members/{member_user_id}")
+def remove_group_member(group_id: int, member_user_id: int, request: Request) -> Any:
     user = must_login(request)
+    _ensure_group_admin_or_system_admin(user, group_id)
+    if member_user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Use leave group to remove yourself")
     with db_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
-                   traffic_allocation_json, result_json, created_at, updated_at
-            FROM experiments
-            WHERE owner_user_id = ?
-            ORDER BY updated_at DESC
-            """,
-            (user["id"],),
-        ).fetchall()
-    data = []
-    for row in rows:
-        item = dict(row)
-        item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
-        item["result"] = _json_loads(item.pop("result_json"), {})
-        data.append(item)
-    return data
-
-
-@app.post("/api/experiments")
-def create_experiment(body: ExperimentCreateInput, request: Request) -> Any:
-    user = must_login(request)
-    now = now_utc().isoformat()
-    conversation_id = body.conversation_id
-    if conversation_id is not None:
-        conversation_owner_or_404(user["id"], conversation_id)
-    with db_conn() as conn:
-        experiment_id = _insert_and_get_id(
-            conn,
-            """
-            INSERT INTO experiments (
-                owner_user_id, conversation_id, title, hypothesis, status,
-                traffic_allocation_json, result_json, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, 'draft', ?, '{}', ?, ?)
-            """,
-            (
-                user["id"],
-                conversation_id,
-                body.title.strip()[:160],
-                body.hypothesis.strip()[:2000],
-                _json_dumps(body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}),
-                now,
-                now,
-            ),
-        )
-    return {"ok": True, "id": experiment_id}
-
-
-@app.get("/api/experiments/{experiment_id}")
-def get_experiment(experiment_id: int, request: Request) -> Any:
-    user = must_login(request)
-    with db_conn() as conn:
-        exp = conn.execute(
-            """
-            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
-                   traffic_allocation_json, result_json, created_at, updated_at
-            FROM experiments
-            WHERE id = ? AND owner_user_id = ?
-            """,
-            (experiment_id, user["id"]),
+        group_row = conn.execute(
+            "SELECT id, name, group_type FROM groups WHERE id = ?",
+            (group_id,),
         ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        variants = conn.execute(
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found")
+        membership = conn.execute(
             """
-            SELECT id, variant_key, content, created_at
-            FROM experiment_variants
-            WHERE experiment_id = ?
-            ORDER BY id ASC
+            SELECT gm.user_id, gm.role, gm.status, u.username
+            FROM group_memberships gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ? AND gm.user_id = ?
             """,
-            (experiment_id,),
-        ).fetchall()
-    item = dict(exp)
-    item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
-    item["result"] = _json_loads(item.pop("result_json"), {})
-    item["variants"] = [dict(v) for v in variants]
-    return item
-
-
-@app.patch("/api/experiments/{experiment_id}")
-def update_experiment(experiment_id: int, body: ExperimentUpdateInput, request: Request) -> Any:
-    user = must_login(request)
-    updates: dict[str, Any] = {}
-    if body.title is not None:
-        title = body.title.strip()
-        if not title:
-            raise HTTPException(status_code=400, detail="title cannot be empty")
-        updates["title"] = title[:160]
-    if body.hypothesis is not None:
-        hypothesis = body.hypothesis.strip()
-        if not hypothesis:
-            raise HTTPException(status_code=400, detail="hypothesis cannot be empty")
-        updates["hypothesis"] = hypothesis[:2000]
-    if body.traffic_allocation is not None:
-        updates["traffic_allocation_json"] = _json_dumps(
-            body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}
-        )
-    if not updates:
-        raise HTTPException(status_code=400, detail="No valid fields to update")
-
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
+            (group_id, member_user_id),
         ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        set_sql = ", ".join([f"{key} = ?" for key in updates.keys()] + ["updated_at = ?"])
-        values = list(updates.values()) + [now, experiment_id]
-        conn.execute(f"UPDATE experiments SET {set_sql} WHERE id = ?", tuple(values))
-    return {"ok": True}
-
-
-@app.post("/api/experiments/{experiment_id}/variants")
-def upsert_experiment_variant(experiment_id: int, body: ExperimentVariantInput, request: Request) -> Any:
-    user = must_login(request)
-    key = body.variant_key.strip().lower()
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        existing = conn.execute(
-            """
-            SELECT id FROM experiment_variants
-            WHERE experiment_id = ? AND variant_key = ?
-            """,
-            (experiment_id, key[:40]),
-        ).fetchone()
-        if existing:
+        if not membership or membership["status"] != "approved":
+            raise HTTPException(status_code=404, detail="Approved group member not found")
+        if _is_general_group_row(group_row) and membership["role"] == "admin":
+            raise HTTPException(status_code=400, detail="General Group admin is fixed to admin")
+        if membership["role"] == "admin":
+            other_admin_count = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM group_memberships
+                WHERE group_id = ? AND status = 'approved' AND role = 'admin' AND user_id != ?
+                """,
+                (group_id, member_user_id),
+            ).fetchone()["cnt"]
+            if other_admin_count <= 0:
+                raise HTTPException(status_code=400, detail="Cannot remove the last admin from this group")
+        if _is_general_group_row(group_row):
             conn.execute(
                 """
-                UPDATE experiment_variants
-                SET content = ?
-                WHERE experiment_id = ? AND variant_key = ?
+                UPDATE group_memberships
+                SET role = 'member', status = 'left', approved_at = NULL
+                WHERE group_id = ? AND user_id = ?
                 """,
-                (body.content.strip()[:10000], experiment_id, key[:40]),
+                (group_id, member_user_id),
             )
         else:
             conn.execute(
-                """
-                INSERT INTO experiment_variants (experiment_id, variant_key, content, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (experiment_id, key[:40], body.content.strip()[:10000], now),
+                "DELETE FROM group_memberships WHERE group_id = ? AND user_id = ?",
+                (group_id, member_user_id),
             )
-        conn.execute(
-            "UPDATE experiments SET updated_at = ? WHERE id = ?",
-            (now, experiment_id),
-        )
-    return {"ok": True}
-
-
-@app.patch("/api/experiments/{experiment_id}/status")
-def update_experiment_status(experiment_id: int, body: ExperimentStatusInput, request: Request) -> Any:
-    user = must_login(request)
-    status = body.status.strip().lower()
-    if status not in {"draft", "running", "paused", "completed", "archived"}:
-        raise HTTPException(status_code=400, detail="Unsupported experiment status")
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        conn.execute(
-            """
-            UPDATE experiments
-            SET status = ?, result_json = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (status, _json_dumps(body.result if isinstance(body.result, dict) else {}), now, experiment_id),
-        )
-    return {"ok": True}
-
-
-@app.delete("/api/experiments/{experiment_id}")
-def delete_experiment(experiment_id: int, request: Request) -> Any:
-    user = must_login(request)
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        conn.execute("DELETE FROM experiment_variants WHERE experiment_id = ?", (experiment_id,))
-        conn.execute("DELETE FROM experiments WHERE id = ?", (experiment_id,))
-    return {"ok": True}
+    return {"ok": True, "group_id": group_id, "removed_user_id": member_user_id}
 
 
 @app.get("/api/kb/list")

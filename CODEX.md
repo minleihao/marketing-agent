@@ -11,8 +11,9 @@ The product includes:
 - group collaboration (`task` and `company` groups)
 - visibility model (`private`, `task`, `company`)
 - shared Knowledge Base with versioning
-- experiment management bound to conversations
-- bilingual UI (`zh` / `en`)
+- protected `General Group` shared by all registered users
+- admin-owned default shared Knowledge Base entries and sample shared conversations
+- English-only UI
 
 ## Runtime Map
 - Main web backend entry: `/Users/minleihao/marketing-agent/novaRed/src/webapp.py`
@@ -39,10 +40,12 @@ Rules that must remain true:
 - `task` visibility must reference an approved `task` group membership
 - `company` visibility must reference an approved `company` group membership
 - KB binding to conversation must verify current user can access that KB version
+- `General Group` must remain protected, admin-owned, and auto-joined for new users
 
 ## Collaboration Semantics
 - Shared records and owner records must stay distinguishable in API payloads and UI labels.
 - Group lifecycle includes request, approve/reject, invite accept/reject, leave, and admin transfer.
+- Group admins and system admin can remove approved members; removing a `General Group` member must not auto-rejoin them until they explicitly join again.
 - Group deletion authorization:
   - group admin can delete own group
   - system admin can delete any group
@@ -52,7 +55,7 @@ Rules that must remain true:
 - `src/webapp.py` still contains many routes and domain helpers; refactor incrementally by feature slice.
 - Keep backward-compatible schema migrations for existing deployments.
 - Preserve SSE streaming behavior and fallback handling in message endpoints.
-- Keep bilingual key parity for every new UI string.
+- Keep seeded defaults idempotent so restarts do not duplicate General Group resources.
 
 ## Recommended Dev Workflow
 1. Make focused refactors with behavior-preserving tests first.
@@ -63,6 +66,6 @@ Rules that must remain true:
 4. For permission changes, validate cross-user visibility and forbidden access paths.
 
 ## Next Refactor Targets
-- Split `webapp.py` route domains into routers (`auth`, `groups`, `kb`, `conversations`, `experiments`, `admin`).
+- Split `webapp.py` route domains into routers (`auth`, `groups`, `kb`, `conversations`, `admin`).
 - Extract shared permission/service logic to dedicated modules.
 - Continue reducing cross-cutting global helpers in favor of explicit service boundaries.

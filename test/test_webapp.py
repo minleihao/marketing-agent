@@ -255,81 +255,145 @@ def test_cannot_bind_private_kb_owned_by_other_user(webapp_module):
         assert "No access to this Knowledge Base version" in attach_res.text
 
 
-def test_experiment_lifecycle_api(webapp_module):
+def test_registered_user_auto_joins_general_group(webapp_module):
     with TestClient(webapp_module.app) as client:
-        headers = _register(client, "exp_user")
-        conv_res = client.post(
-            "/api/conversations",
-            json={"task_mode": "marketing"},
+        _register(client, "general_group_user")
+        mine_res = client.get("/api/groups/mine")
+        assert mine_res.status_code == 200, mine_res.text
+        general_group = next((item for item in mine_res.json() if item["name"] == "General Group"), None)
+        assert general_group is not None
+        assert general_group["group_type"] == "company"
+        assert general_group["role"] == "member"
+        assert general_group["status"] == "approved"
+
+        public_res = client.get("/api/public/groups")
+        assert public_res.status_code == 200, public_res.text
+        assert all(item["name"] != "General Group" for item in public_res.json())
+
+
+def test_admin_manages_general_group_and_shared_default_kbs(webapp_module):
+    with TestClient(webapp_module.app) as admin_client, TestClient(webapp_module.app) as member_client:
+        _login_admin(admin_client)
+        _register(member_client, "default_kb_user")
+
+        admin_groups_res = admin_client.get("/api/groups/mine")
+        assert admin_groups_res.status_code == 200, admin_groups_res.text
+        general_group = next((item for item in admin_groups_res.json() if item["name"] == "General Group"), None)
+        assert general_group is not None
+        assert general_group["role"] == "admin"
+
+        kb_res = member_client.get("/api/kb/list")
+        assert kb_res.status_code == 200, kb_res.text
+        kb_rows = {item["kb_key"]: item for item in kb_res.json()}
+        assert "default_brand_guidelines" in kb_rows
+        assert "default_campaign_playbook" in kb_rows
+        assert kb_rows["default_brand_guidelines"]["owner_username"] == "admin"
+        assert kb_rows["default_brand_guidelines"]["visibility"] == "company"
+        assert kb_rows["default_brand_guidelines"]["share_group_name"] == "General Group"
+        assert kb_rows["default_campaign_playbook"]["owner_username"] == "admin"
+        assert kb_rows["default_campaign_playbook"]["visibility"] == "company"
+        assert kb_rows["default_campaign_playbook"]["share_group_name"] == "General Group"
+
+
+def test_general_group_sample_chats_are_visible_to_new_user(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        _register(client, "general_group_sample_user")
+
+        conversations_res = client.get("/api/conversations")
+        assert conversations_res.status_code == 200, conversations_res.text
+        rows = conversations_res.json()
+        by_title = {item["title"]: item for item in rows}
+
+        marketing_chat = by_title.get("Sample Marketing Chat")
+        random_chat = by_title.get("Sample General Chat")
+        assert marketing_chat is not None
+        assert random_chat is not None
+        assert marketing_chat["owner_username"] == "admin"
+        assert marketing_chat["visibility"] == "company"
+        assert marketing_chat["share_group_name"] == "General Group"
+        assert marketing_chat["task_mode"] == "marketing"
+        assert random_chat["task_mode"] == "chat"
+
+        messages_res = client.get(f"/api/conversations/{marketing_chat['id']}/messages")
+        assert messages_res.status_code == 200, messages_res.text
+        messages = messages_res.json()
+        assert len(messages) >= 2
+        assert messages[0]["role"] == "user"
+        assert messages[1]["role"] == "assistant"
+        assert "Channel Plan" in messages[1]["content"]
+
+
+def test_member_can_leave_and_rejoin_general_group(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "general_leave_user")
+        mine_res = client.get("/api/groups/mine")
+        assert mine_res.status_code == 200, mine_res.text
+        general_group = next((item for item in mine_res.json() if item["name"] == "General Group"), None)
+        assert general_group is not None
+        group_id = general_group["id"]
+
+        conversations_before_leave = client.get("/api/conversations")
+        assert conversations_before_leave.status_code == 200, conversations_before_leave.text
+        titles_before_leave = {item["title"] for item in conversations_before_leave.json()}
+        assert "Sample Marketing Chat" in titles_before_leave
+        assert "Sample General Chat" in titles_before_leave
+
+        leave_res = client.post(f"/api/groups/{group_id}/leave", headers=headers)
+        assert leave_res.status_code == 200, leave_res.text
+
+        mine_after_leave = client.get("/api/groups/mine")
+        assert mine_after_leave.status_code == 200, mine_after_leave.text
+        assert all(item["id"] != group_id for item in mine_after_leave.json())
+
+        kb_after_leave = client.get("/api/kb/list")
+        assert kb_after_leave.status_code == 200, kb_after_leave.text
+        kb_keys_after_leave = {item["kb_key"] for item in kb_after_leave.json()}
+        assert "default_brand_guidelines" not in kb_keys_after_leave
+        assert "default_campaign_playbook" not in kb_keys_after_leave
+
+        conversations_after_leave = client.get("/api/conversations")
+        assert conversations_after_leave.status_code == 200, conversations_after_leave.text
+        titles_after_leave = {item["title"] for item in conversations_after_leave.json()}
+        assert "Sample Marketing Chat" not in titles_after_leave
+        assert "Sample General Chat" not in titles_after_leave
+
+        rejoin_res = client.post(f"/api/groups/{group_id}/join", headers=headers)
+        assert rejoin_res.status_code == 200, rejoin_res.text
+        assert rejoin_res.json()["status"] == "approved"
+
+        kb_after_rejoin = client.get("/api/kb/list")
+        assert kb_after_rejoin.status_code == 200, kb_after_rejoin.text
+        kb_keys_after_rejoin = {item["kb_key"] for item in kb_after_rejoin.json()}
+        assert "default_brand_guidelines" in kb_keys_after_rejoin
+        assert "default_campaign_playbook" in kb_keys_after_rejoin
+
+        conversations_after_rejoin = client.get("/api/conversations")
+        assert conversations_after_rejoin.status_code == 200, conversations_after_rejoin.text
+        titles_after_rejoin = {item["title"] for item in conversations_after_rejoin.json()}
+        assert "Sample Marketing Chat" in titles_after_rejoin
+        assert "Sample General Chat" in titles_after_rejoin
+
+
+def test_general_group_cannot_be_deleted_or_transferred(webapp_module):
+    with TestClient(webapp_module.app) as admin_client:
+        headers = _login_admin(admin_client)
+        mine_res = admin_client.get("/api/groups/mine")
+        assert mine_res.status_code == 200, mine_res.text
+        general_group = next((item for item in mine_res.json() if item["name"] == "General Group"), None)
+        assert general_group is not None
+        group_id = general_group["id"]
+
+        delete_res = admin_client.delete(f"/api/groups/{group_id}", headers=headers)
+        assert delete_res.status_code == 400, delete_res.text
+        assert "General Group is protected" in delete_res.text
+
+        transfer_res = admin_client.post(
+            f"/api/groups/{group_id}/transfer-admin",
+            json={"new_admin_user_id": _current_user_id(admin_client)},
             headers=headers,
         )
-        assert conv_res.status_code == 200, conv_res.text
-        conversation_id = conv_res.json()["id"]
-
-        create_res = client.post(
-            "/api/experiments",
-            json={
-                "title": "Hook A/B Test",
-                "hypothesis": "Outcome-first hook should improve CTR.",
-                "conversation_id": conversation_id,
-                "traffic_allocation": {"A": 50, "B": 50},
-            },
-            headers=headers,
-        )
-        assert create_res.status_code == 200, create_res.text
-        experiment_id = create_res.json()["id"]
-        assert experiment_id > 0
-
-        variant_res = client.post(
-            f"/api/experiments/{experiment_id}/variants",
-            json={"variant_key": "A", "content": "Version A copy"},
-            headers=headers,
-        )
-        assert variant_res.status_code == 200, variant_res.text
-        assert variant_res.json()["ok"] is True
-
-        detail_res = client.get(f"/api/experiments/{experiment_id}")
-        assert detail_res.status_code == 200, detail_res.text
-        detail = detail_res.json()
-        assert detail["title"] == "Hook A/B Test"
-        assert detail["traffic_allocation"] == {"A": 50, "B": 50}
-        assert len(detail["variants"]) == 1
-        assert detail["variants"][0]["variant_key"] == "a"
-
-        meta_res = client.patch(
-            f"/api/experiments/{experiment_id}",
-            json={
-                "title": "Hook A/B Test v2",
-                "hypothesis": "Problem-first hook may outperform outcome-first for this audience.",
-                "traffic_allocation": {"A": 40, "B": 60},
-            },
-            headers=headers,
-        )
-        assert meta_res.status_code == 200, meta_res.text
-        assert meta_res.json()["ok"] is True
-
-        status_res = client.patch(
-            f"/api/experiments/{experiment_id}/status",
-            json={"status": "running", "result": {"ctr_lift": 0.12}},
-            headers=headers,
-        )
-        assert status_res.status_code == 200, status_res.text
-        assert status_res.json()["ok"] is True
-
-        detail_res_2 = client.get(f"/api/experiments/{experiment_id}")
-        assert detail_res_2.status_code == 200, detail_res_2.text
-        detail_2 = detail_res_2.json()
-        assert detail_2["title"] == "Hook A/B Test v2"
-        assert detail_2["traffic_allocation"] == {"A": 40, "B": 60}
-        assert detail_2["status"] == "running"
-        assert detail_2["result"] == {"ctr_lift": 0.12}
-
-        delete_res = client.delete(f"/api/experiments/{experiment_id}", headers=headers)
-        assert delete_res.status_code == 200, delete_res.text
-        assert delete_res.json()["ok"] is True
-
-        not_found_res = client.get(f"/api/experiments/{experiment_id}")
-        assert not_found_res.status_code == 404
+        assert transfer_res.status_code == 400, transfer_res.text
+        assert "General Group admin is fixed to admin" in transfer_res.text
 
 
 def test_create_group_rejects_blank_name_after_trim(webapp_module):
@@ -613,6 +677,80 @@ def test_group_members_are_scoped_per_group(webapp_module):
         assert "scoped_alpha_user" not in usernames_b
 
 
+def test_group_admin_can_remove_member(webapp_module):
+    with TestClient(webapp_module.app) as owner_client, TestClient(webapp_module.app) as member_client:
+        owner_headers = _register(owner_client, "remove_member_owner")
+        member_headers = _register(member_client, "remove_member_target")
+
+        create_res = owner_client.post(
+            "/api/groups",
+            json={"name": "Remove Member Group", "group_type": "task"},
+            headers=owner_headers,
+        )
+        assert create_res.status_code == 200, create_res.text
+        group_id = create_res.json()["id"]
+
+        member_id = _current_user_id(member_client)
+        join_res = member_client.post(f"/api/groups/{group_id}/join", headers=member_headers)
+        assert join_res.status_code == 200, join_res.text
+
+        approve_res = owner_client.post(
+            f"/api/groups/{group_id}/requests/{member_id}/approve",
+            headers=owner_headers,
+        )
+        assert approve_res.status_code == 200, approve_res.text
+
+        remove_res = owner_client.delete(
+            f"/api/groups/{group_id}/members/{member_id}",
+            headers=owner_headers,
+        )
+        assert remove_res.status_code == 200, remove_res.text
+        assert remove_res.json()["removed_user_id"] == member_id
+
+        members_res = owner_client.get(f"/api/groups/{group_id}/members")
+        assert members_res.status_code == 200, members_res.text
+        assert all(item["user_id"] != member_id for item in members_res.json())
+
+        member_groups_res = member_client.get("/api/groups/mine")
+        assert member_groups_res.status_code == 200, member_groups_res.text
+        assert all(item["id"] != group_id for item in member_groups_res.json())
+
+
+def test_system_admin_can_remove_general_group_member_and_revoke_shared_defaults(webapp_module):
+    with TestClient(webapp_module.app) as admin_client, TestClient(webapp_module.app) as member_client:
+        admin_headers = _login_admin(admin_client)
+        _register(member_client, "general_group_removed_user")
+        member_id = _current_user_id(member_client)
+
+        admin_groups_res = admin_client.get("/api/groups")
+        assert admin_groups_res.status_code == 200, admin_groups_res.text
+        general_group = next((item for item in admin_groups_res.json() if item["name"] == "General Group"), None)
+        assert general_group is not None
+        group_id = general_group["id"]
+
+        remove_res = admin_client.delete(
+            f"/api/groups/{group_id}/members/{member_id}",
+            headers=admin_headers,
+        )
+        assert remove_res.status_code == 200, remove_res.text
+
+        member_groups_res = member_client.get("/api/groups/mine")
+        assert member_groups_res.status_code == 200, member_groups_res.text
+        assert all(item["id"] != group_id for item in member_groups_res.json())
+
+        member_kb_res = member_client.get("/api/kb/list")
+        assert member_kb_res.status_code == 200, member_kb_res.text
+        member_kb_keys = {item["kb_key"] for item in member_kb_res.json()}
+        assert "default_brand_guidelines" not in member_kb_keys
+        assert "default_campaign_playbook" not in member_kb_keys
+
+        member_conv_res = member_client.get("/api/conversations")
+        assert member_conv_res.status_code == 200, member_conv_res.text
+        member_conv_titles = {item["title"] for item in member_conv_res.json()}
+        assert "Sample Marketing Chat" not in member_conv_titles
+        assert "Sample General Chat" not in member_conv_titles
+
+
 def test_last_group_admin_cannot_leave_group(webapp_module):
     with TestClient(webapp_module.app) as client:
         headers = _register(client, "solo_group_admin_user")
@@ -781,7 +919,21 @@ def test_delete_group_detaches_shared_conversation_and_kb_visibility(webapp_modu
 def test_authenticated_static_pages_render_successfully(webapp_module):
     with TestClient(webapp_module.app) as client:
         _register(client, "page_smoke_user")
-        for path in ("/app", "/kb", "/groups", "/experiments"):
+        for path in ("/app", "/kb", "/groups"):
             res = client.get(path)
             assert res.status_code == 200, f"{path} failed: {res.status_code} {res.text[:120]}"
             assert "Marketing Copilot" in res.text
+
+
+def test_experiments_page_is_removed(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        _register(client, "removed_experiment_page_user")
+        res = client.get("/experiments")
+        assert res.status_code == 404
+
+
+def test_experiments_api_is_removed(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        headers = _register(client, "removed_experiment_api_user")
+        res = client.get("/api/experiments", headers=headers)
+        assert res.status_code == 404
