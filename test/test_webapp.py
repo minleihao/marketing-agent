@@ -937,3 +937,9 @@ def test_experiments_api_is_removed(webapp_module):
         headers = _register(client, "removed_experiment_api_user")
         res = client.get("/api/experiments", headers=headers)
         assert res.status_code == 404
+def test_experiment_routes_are_not_available(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        _register(client, "page_no_experiments_user")
+        for path in ("/experiments", "/api/experiments"):
+            res = client.get(path)
+            assert res.status_code == 404, f"{path} should be removed"

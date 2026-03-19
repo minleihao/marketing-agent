@@ -30,6 +30,10 @@ uv run python main.py
 ```
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+## User Guide
+
+For a non-technical end-user guide for the marketing team, see [MARKETING_TEAM_USER_GUIDE.md](MARKETING_TEAM_USER_GUIDE.md).
+
 ## Environment Variables
 - `NOVARED_DATABASE_URL` or `DATABASE_URL`: PostgreSQL DSN (enables PostgreSQL backend)
 - `NOVARED_DATA_DIR`: local data directory (default: `data/`)
