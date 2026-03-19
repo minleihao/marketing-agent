@@ -5,7 +5,6 @@ Marketing Copilot is a FastAPI web application for multi-user marketing collabor
 - conversation history and per-conversation model settings
 - shared, versioned Knowledge Base management
 - group-based access control (`private`, `task`, `company`)
-- experiment tracking linked to conversations
 - document upload and retrieval context support
 - bilingual UI (English / Chinese)
 
@@ -29,6 +28,10 @@ uv sync
 uv run python main.py
 ```
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
+
+## User Guide
+
+For a non-technical end-user guide for the marketing team, see [MARKETING_TEAM_USER_GUIDE.md](MARKETING_TEAM_USER_GUIDE.md).
 
 ## Environment Variables
 - `NOVARED_DATABASE_URL` or `DATABASE_URL`: PostgreSQL DSN (enables PostgreSQL backend)

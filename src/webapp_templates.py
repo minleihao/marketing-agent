@@ -1036,7 +1036,6 @@ APP_HTML = """
       </div>
       <div class="global-actions">
         <button class="btn" onclick="gotoGroups()" data-i18n="group_mgmt">组管理</button>
-        <button class="btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button class="btn" onclick="changePassword()" data-i18n="change_password">修改密码</button>
         <button class="btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="user_mgmt">用户管理</button>
         <button class="btn" onclick="logout()" data-i18n="logout">退出</button>
@@ -1273,7 +1272,6 @@ const I18N = {
     kb_create: '新建 Knowledge Base 版本',
     kb_mgmt: 'Knowledge Base 管理',
     group_mgmt: '组管理',
-    experiments_nav: '实验中心',
     change_password: '修改密码',
     force_change_password: '为了安全，请先修改默认密码。',
     old_password_prompt: '请输入当前密码',
@@ -1406,7 +1404,6 @@ const I18N = {
     kb_create: 'New Knowledge Base Version',
     kb_mgmt: 'Knowledge Base Management',
     group_mgmt: 'Group Management',
-    experiments_nav: 'Experiments',
     change_password: 'Change Password',
     force_change_password: 'For security, please change your default password first.',
     old_password_prompt: 'Enter current password',
@@ -3248,7 +3245,6 @@ async function renameConversation() {
 function gotoAdmin() { location.href = '/admin'; }
 function gotoKB() { location.href = '/kb'; }
 function gotoGroups() { location.href = '/groups'; }
-function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init(){
   try {
@@ -3497,7 +3493,6 @@ KB_HTML = """
       <h2 data-i18n="title">Knowledge Base 管理</h2>
       <div class="toolbar">
         <div class="top-tabs">
-          <button class="tab-btn" onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
           <button class="tab-btn" onclick="backToApp()" data-i18n="back">返回聊天</button>
           <button class="tab-btn" onclick="logout()" data-i18n="logout">退出</button>
         </div>
@@ -3584,7 +3579,6 @@ KB_HTML = """
 const I18N = {
   zh: {
     title: 'Knowledge Base 管理',
-    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     kb_list: 'Knowledge Base 列表',
@@ -3622,7 +3616,6 @@ const I18N = {
   },
   en: {
     title: 'Knowledge Base Management',
-    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     kb_list: 'Knowledge Base List',
@@ -3941,7 +3934,6 @@ async function deleteVersion() {
 }
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function backToApp() { location.href = '/app'; }
-function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -4019,7 +4011,6 @@ GROUPS_HTML = """
     <div class="top">
       <h2 data-i18n="title">组管理</h2>
       <div class="toolbar">
-        <button onclick="gotoExperiments()" data-i18n="experiments_nav">实验中心</button>
         <button onclick="backToApp()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -4088,7 +4079,6 @@ GROUPS_HTML = """
 const I18N = {
   zh: {
     title: '组管理',
-    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     create_group: '创建组',
@@ -4132,7 +4122,6 @@ const I18N = {
   },
   en: {
     title: 'Group Management',
-    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     create_group: 'Create Group',
@@ -4640,7 +4629,6 @@ async function transferAdmin() {
 }
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function backToApp() { location.href = '/app'; }
-function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -4778,7 +4766,6 @@ ADMIN_HTML = """
     <div class="top">
       <h2 data-i18n="title">用户管理</h2>
       <div class="toolbar">
-        <button onclick="gotoExperiments()" data-i18n="experiments_nav">Experiments</button>
         <button onclick="back()" data-i18n="back">返回聊天</button>
         <button onclick="logout()" data-i18n="logout">退出</button>
       </div>
@@ -4823,7 +4810,6 @@ const I18N = {
   zh: {
     page_title: '用户管理',
     title: '用户管理',
-    experiments_nav: '实验中心',
     back: '返回聊天',
     logout: '退出',
     create_user: '创建用户',
@@ -4854,7 +4840,6 @@ const I18N = {
   en: {
     page_title: 'User Management',
     title: 'User Management',
-    experiments_nav: 'Experiments',
     back: 'Back to Chat',
     logout: 'Log Out',
     create_user: 'Create User',
@@ -4977,7 +4962,6 @@ async function resetPwd(userId) {
 
 async function logout() { await api('/logout', {method:'POST'}); location.href = '/'; }
 function back() { location.href = '/app'; }
-function gotoExperiments() { location.href = '/experiments'; }
 
 (async function init() {
   applyI18n();
@@ -4986,799 +4970,6 @@ function gotoExperiments() { location.href = '/experiments'; }
     await loadUsers();
   } catch (_) {
     location.href = '/app';
-  }
-})();
-</script>
-</body>
-</html>
-"""
-
-
-EXPERIMENTS_HTML = """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Marketing Copilot - Experiments</title>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
-    :root {
-      --bg:#dce7f5;
-      --bg-soft:#dceee7;
-      --line:rgba(170,186,209,.55);
-      --line-strong:rgba(136,160,191,.68);
-      --txt:#102037;
-      --muted:#4f647f;
-      --accent:#0b6fde;
-      --ok:#0f766e;
-      --danger:#c53939;
-      --shadow:0 22px 44px rgba(17,35,62,.16);
-    }
-    * { box-sizing:border-box; }
-    body {
-      margin:0;
-      font-family:"IBM Plex Sans","Segoe UI",sans-serif;
-      background:
-        radial-gradient(980px 580px at -4% -20%,#eef5ff 0%,transparent 62%),
-        radial-gradient(920px 520px at 104% -24%,#e8fff4 0%,transparent 64%),
-        radial-gradient(760px 480px at 50% 108%,#eaf1ff 0%,transparent 68%),
-        linear-gradient(160deg,var(--bg),var(--bg-soft));
-      color:var(--txt);
-      min-height:100vh;
-    }
-    body::before {
-      content:"";
-      position:fixed;
-      inset:-18%;
-      pointer-events:none;
-      background:
-        radial-gradient(520px 300px at 18% 24%,rgba(255,255,255,.42),transparent 70%),
-        radial-gradient(500px 280px at 82% 14%,rgba(255,255,255,.34),transparent 72%),
-        radial-gradient(600px 340px at 60% 84%,rgba(255,255,255,.24),transparent 74%);
-      filter:blur(16px) saturate(120%);
-      opacity:.9;
-      z-index:0;
-    }
-    .wrap {
-      max-width:1240px;
-      margin:14px auto;
-      padding:0 12px;
-      position:relative;
-      z-index:1;
-    }
-    .top {
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      gap:10px;
-      margin-bottom:10px;
-      padding:8px 10px;
-      border:1px solid var(--line);
-      border-radius:16px;
-      background:rgba(255,255,255,.56);
-      box-shadow:var(--shadow);
-      backdrop-filter: blur(22px) saturate(145%);
-    }
-    .top h2 {
-      margin:0;
-      font-family:"Sora","IBM Plex Sans",sans-serif;
-      font-size:19px;
-      letter-spacing:.1px;
-    }
-    .toolbar {
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-    .lang {
-      display:flex;
-      gap:6px;
-      padding:4px;
-      border:1px solid var(--line);
-      border-radius:999px;
-      background:rgba(255,255,255,.52);
-      backdrop-filter: blur(14px);
-    }
-    .lang button {
-      width:auto;
-      padding:5px 10px;
-      border-radius:999px;
-      border:0;
-      box-shadow:none;
-      background:transparent;
-    }
-    .lang button.active {
-      background:var(--accent);
-      color:#fff;
-    }
-    .top-tabs {
-      display:flex;
-      gap:6px;
-      align-items:center;
-      flex-wrap:wrap;
-    }
-    .tab-btn {
-      width:auto;
-      padding:6px 9px;
-      font-size:12px;
-      border-radius:10px;
-    }
-    .layout { display:grid; grid-template-columns: 320px 1fr; gap:10px; }
-    .card {
-      background:rgba(255,255,255,.56);
-      border:1px solid var(--line);
-      border-radius:18px;
-      padding:12px;
-      box-shadow:var(--shadow);
-      backdrop-filter: blur(22px) saturate(145%);
-    }
-    .card h3 { margin:0 0 8px; font-family:"Sora","IBM Plex Sans",sans-serif; font-size:16px; }
-    label {
-      font-size:11px;
-      color:var(--muted);
-      display:block;
-      margin-bottom:4px;
-      font-weight:600;
-    }
-    input, select, textarea, button {
-      width:100%;
-      box-sizing:border-box;
-      padding:8px 9px;
-      border-radius:10px;
-      border:1px solid var(--line);
-      font-family:inherit;
-      color:var(--txt);
-      background:rgba(255,255,255,.62);
-      backdrop-filter: blur(12px) saturate(130%);
-      transition:.16s ease;
-    }
-    textarea {
-      min-height:90px;
-      font-family:"IBM Plex Mono",ui-monospace,monospace;
-      font-size:12px;
-      resize:vertical;
-    }
-    input:focus, select:focus, textarea:focus {
-      outline:none;
-      border-color:var(--accent);
-      box-shadow:0 0 0 3px rgba(10,103,211,.14);
-    }
-    button { cursor:pointer; font-weight:600; }
-    button:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:0 8px 14px rgba(15,30,60,.07); }
-    button.primary { background:linear-gradient(120deg,var(--accent),#0987cf); border-color:transparent; color:#fff; }
-    .list {
-      display:flex;
-      flex-direction:column;
-      gap:8px;
-      max-height:620px;
-      overflow:auto;
-      padding-right:2px;
-      margin-bottom:8px;
-    }
-    .item {
-      border:1px solid var(--line);
-      border-radius:11px;
-      padding:8px;
-      cursor:pointer;
-      background:rgba(255,255,255,.62);
-      transition:.16s ease;
-    }
-    .item:hover { transform:translateY(-1px); border-color:var(--line-strong); }
-    .item.active { border-color:var(--accent); box-shadow:0 0 0 3px rgba(10,103,211,.14); background:#fbfdff; }
-    .item .name { font-weight:700; font-size:13px; }
-    .item .meta { color:var(--muted); font-size:11px; margin-top:4px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
-    .empty {
-      border:1px dashed var(--line-strong);
-      border-radius:12px;
-      padding:12px;
-      text-align:center;
-      color:var(--muted);
-      background:rgba(255,255,255,.54);
-      font-size:13px;
-    }
-    .grid { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
-    .full { grid-column:1 / -1; }
-    .section-title { margin:12px 0 8px; font-size:13px; font-weight:700; color:#1b2f4d; }
-    .actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; justify-content:flex-start; }
-    .actions button { width:auto; padding:6px 9px; font-size:12px; }
-    .msg {
-      font-size:12px;
-      margin-top:8px;
-      color:var(--ok);
-      min-height:20px;
-      border-radius:10px;
-      background:rgba(243,253,249,.7);
-      border:1px solid #bde9d9;
-      padding:7px 10px;
-    }
-    .warn { color:var(--danger); background:rgba(255,246,246,.74); border-color:#f0c9c9; }
-    #exp-detail-panel.hidden, #exp-detail-empty.hidden { display:none; }
-    .mono { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
-    .variant-card {
-      border:1px solid var(--line);
-      border-radius:12px;
-      padding:8px;
-      background:rgba(255,255,255,.62);
-      margin-bottom:8px;
-    }
-    .variant-card .key {
-      font-family:"IBM Plex Mono",ui-monospace,monospace;
-      font-size:12px;
-      color:#355174;
-      margin-bottom:6px;
-      text-transform:uppercase;
-    }
-    *::-webkit-scrollbar { width:10px; height:10px; }
-    *::-webkit-scrollbar-thumb { background:#c7d5e8; border-radius:999px; border:2px solid rgba(255,255,255,.9); }
-    *::-webkit-scrollbar-track { background:transparent; }
-    @media (max-width: 1000px) {
-      .layout { grid-template-columns:1fr; }
-      .top { flex-direction:column; align-items:flex-start; }
-      .toolbar { justify-content:flex-start; width:100%; }
-      .top-tabs { width:100%; }
-      .grid { grid-template-columns:1fr; }
-      .actions button { width:100%; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="top">
-      <h2 data-i18n="title">实验中心</h2>
-      <div class="toolbar">
-        <div class="top-tabs">
-          <button class="tab-btn" onclick="gotoApp()" data-i18n="back">返回聊天</button>
-          <button class="tab-btn" onclick="gotoKB()" data-i18n="kb_nav">Knowledge Base 管理</button>
-          <button class="tab-btn" onclick="gotoGroups()" data-i18n="group_nav">组管理</button>
-          <button class="tab-btn" onclick="gotoAdmin()" id="admin-btn" style="display:none" data-i18n="admin_nav">用户管理</button>
-          <button class="tab-btn" onclick="logout()" data-i18n="logout">退出</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="layout">
-      <div class="card">
-        <h3 data-i18n="exp_list">实验列表</h3>
-        <div id="exp-list" class="list"></div>
-
-        <h3 data-i18n="create_exp">创建实验</h3>
-        <label for="create-title" data-i18n="title_label">标题</label>
-        <input id="create-title" />
-        <label for="create-hypothesis" data-i18n="hypothesis_label">假设</label>
-        <textarea id="create-hypothesis"></textarea>
-        <label for="create-conversation" data-i18n="conversation_label">关联会话（可选）</label>
-        <select id="create-conversation"></select>
-        <label for="create-traffic" data-i18n="traffic_label">流量分配 JSON（可选）</label>
-        <textarea id="create-traffic">{"A":50,"B":50}</textarea>
-        <div class="actions">
-          <button class="primary" onclick="createExperiment()" data-i18n="create_btn">创建</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 id="exp-detail-title" data-i18n="detail_title">实验详情</h3>
-        <div id="exp-detail-empty" class="empty"></div>
-
-        <div id="exp-detail-panel" class="hidden">
-          <div class="grid">
-            <div class="full">
-              <label for="detail-name-input" data-i18n="detail_name">实验名称</label>
-              <input id="detail-name-input" />
-            </div>
-            <div class="full">
-              <label for="detail-hypothesis-input" data-i18n="detail_hypothesis">实验假设</label>
-              <textarea id="detail-hypothesis-input"></textarea>
-            </div>
-            <div>
-              <label for="status-select" data-i18n="status_label">状态</label>
-              <select id="status-select">
-                <option value="draft" data-i18n="status_draft">草稿</option>
-                <option value="running" data-i18n="status_running">运行中</option>
-                <option value="paused" data-i18n="status_paused">暂停</option>
-                <option value="completed" data-i18n="status_completed">完成</option>
-                <option value="archived" data-i18n="status_archived">归档</option>
-              </select>
-            </div>
-            <div>
-              <label data-i18n="updated_at">更新时间</label>
-              <div id="detail-updated" class="mono"></div>
-            </div>
-            <div class="full">
-              <label data-i18n="traffic_display">流量分配</label>
-              <textarea id="detail-traffic"></textarea>
-            </div>
-            <div class="full">
-              <label for="result-json" data-i18n="result_label">结果 JSON</label>
-              <textarea id="result-json">{}</textarea>
-            </div>
-          </div>
-          <div class="actions">
-            <button onclick="saveExperimentMeta()" data-i18n="save_meta">保存实验信息</button>
-            <button onclick="saveStatusAndResult()" data-i18n="save_status">保存状态与结果</button>
-            <button onclick="deleteExperiment()" data-i18n="delete_experiment">删除实验</button>
-          </div>
-
-          <div class="section-title" data-i18n="variants_title">Variants</div>
-          <div id="variant-list"></div>
-          <div class="grid">
-            <div>
-              <label for="variant-key" data-i18n="variant_key_label">Variant Key</label>
-              <input id="variant-key" placeholder="A" />
-            </div>
-            <div class="full">
-              <label for="variant-content" data-i18n="variant_content_label">Variant Content</label>
-              <textarea id="variant-content"></textarea>
-            </div>
-          </div>
-          <div class="actions">
-            <button onclick="saveVariant()" data-i18n="save_variant">保存 Variant</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div id="msg" class="msg"></div>
-  </div>
-
-<script>
-const I18N = {
-  zh: {
-    title: '实验中心',
-    back: '返回聊天',
-    kb_nav: 'Knowledge Base 管理',
-    group_nav: '组管理',
-    admin_nav: '用户管理',
-    logout: '退出',
-    exp_list: '实验列表',
-    create_exp: '创建实验',
-    title_label: '标题',
-    hypothesis_label: '假设',
-    conversation_label: '关联会话（可选）',
-    traffic_label: '流量分配 JSON（可选）',
-    create_btn: '创建',
-    detail_title: '实验详情',
-    detail_name: '实验名称',
-    detail_hypothesis: '实验假设',
-    status_label: '状态',
-    status_draft: '草稿',
-    status_running: '运行中',
-    status_paused: '暂停',
-    status_completed: '完成',
-    status_archived: '归档',
-    updated_at: '更新时间',
-    traffic_display: '流量分配',
-    result_label: '结果 JSON',
-    save_meta: '保存实验信息',
-    save_status: '保存状态与结果',
-    delete_experiment: '删除实验',
-    variants_title: '实验 Variants',
-    variant_key_label: 'Variant Key',
-    variant_content_label: 'Variant 内容',
-    save_variant: '保存 Variant',
-    request_failed: '请求失败',
-    no_experiments: '还没有实验，请先创建。',
-    no_selected: '请选择一个实验查看详情。',
-    no_variants: '暂无 variants',
-    conv_none: '不关联会话',
-    create_ok: '实验创建成功',
-    update_ok: '实验已更新',
-    variant_ok: 'Variant 已保存',
-    delete_ok: '实验已删除',
-    delete_confirm: '确定删除这个实验吗？',
-    invalid_json: 'JSON 格式错误',
-    required_title: '标题不能为空',
-    required_hypothesis: '假设不能为空',
-    required_variant_key: 'Variant key 不能为空',
-    required_variant_content: 'Variant 内容不能为空'
-  },
-  en: {
-    title: 'Experiments',
-    back: 'Back to Chat',
-    kb_nav: 'Knowledge Base Management',
-    group_nav: 'Group Management',
-    admin_nav: 'User Management',
-    logout: 'Log Out',
-    exp_list: 'Experiments',
-    create_exp: 'Create Experiment',
-    title_label: 'Title',
-    hypothesis_label: 'Hypothesis',
-    conversation_label: 'Conversation (optional)',
-    traffic_label: 'Traffic Allocation JSON (optional)',
-    create_btn: 'Create',
-    detail_title: 'Experiment Detail',
-    detail_name: 'Title',
-    detail_hypothesis: 'Hypothesis',
-    status_label: 'Status',
-    status_draft: 'Draft',
-    status_running: 'Running',
-    status_paused: 'Paused',
-    status_completed: 'Completed',
-    status_archived: 'Archived',
-    updated_at: 'Updated At',
-    traffic_display: 'Traffic Allocation',
-    result_label: 'Result JSON',
-    save_meta: 'Save Experiment Meta',
-    save_status: 'Save Status & Result',
-    delete_experiment: 'Delete Experiment',
-    variants_title: 'Variants',
-    variant_key_label: 'Variant Key',
-    variant_content_label: 'Variant Content',
-    save_variant: 'Save Variant',
-    request_failed: 'Request failed',
-    no_experiments: 'No experiments yet. Create one first.',
-    no_selected: 'Select an experiment to view details.',
-    no_variants: 'No variants yet',
-    conv_none: 'No linked conversation',
-    create_ok: 'Experiment created',
-    update_ok: 'Experiment updated',
-    variant_ok: 'Variant saved',
-    delete_ok: 'Experiment deleted',
-    delete_confirm: 'Delete this experiment?',
-    invalid_json: 'Invalid JSON',
-    required_title: 'Title is required',
-    required_hypothesis: 'Hypothesis is required',
-    required_variant_key: 'Variant key is required',
-    required_variant_content: 'Variant content is required'
-  }
-};
-
-let currentLang = 'en';
-let csrfToken = '';
-let me = null;
-let conversations = [];
-let experiments = [];
-let activeExperiment = null;
-
-function t(key) {
-  return (I18N[currentLang] && I18N[currentLang][key]) || key;
-}
-
-function setMsg(text, isWarn=false) {
-  const el = document.getElementById('msg');
-  el.textContent = text || '';
-  el.classList.toggle('warn', !!isWarn);
-}
-
-function statusLabel(status) {
-  return t(`status_${status}`) || status;
-}
-
-function fmt(ts) {
-  try { return new Date(ts).toLocaleString(); } catch (_) { return ts || ''; }
-}
-
-function parseJsonObject(text, fallback={}) {
-  const raw = (text || '').trim();
-  if (!raw) return fallback;
-  const value = JSON.parse(raw);
-  if (!value || Array.isArray(value) || typeof value !== 'object') {
-    throw new Error(t('invalid_json'));
-  }
-  return value;
-}
-
-function pretty(value) {
-  try { return JSON.stringify(value || {}, null, 2); } catch (_) { return '{}'; }
-}
-
-function setLang(lang) {
-  currentLang = 'en';
-  localStorage.setItem('nova_lang', currentLang);
-  applyI18n();
-  renderConversationSelect();
-  renderExperiments();
-  renderExperimentDetail();
-}
-
-function applyI18n() {
-  document.title = t('title');
-  document.documentElement.lang = 'en';
-  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-}
-
-async function api(url, options={}) {
-  const method = (options.method || 'GET').toUpperCase();
-  const headers = {'Content-Type':'application/json'};
-  if (csrfToken && ['POST','PUT','PATCH','DELETE'].includes(method)) {
-    headers['X-CSRF-Token'] = csrfToken;
-  }
-  const res = await fetch(url, {headers, ...options});
-  let data = {};
-  try { data = await res.json(); } catch (_) {}
-  if (!res.ok) {
-    const err = new Error(data.detail || t('request_failed'));
-    err.status = res.status;
-    throw err;
-  }
-  return data;
-}
-
-async function loadCsrfToken() {
-  const res = await fetch('/api/csrf');
-  if (!res.ok) {
-    let data = {};
-    try { data = await res.json(); } catch (_) {}
-    const err = new Error(data.detail || 'csrf');
-    err.status = res.status;
-    throw err;
-  }
-  const data = await res.json();
-  csrfToken = data.csrf_token || '';
-}
-
-function isAuthError(err) {
-  const status = err && typeof err === 'object' ? err.status : null;
-  return status === 401;
-}
-
-function renderConversationSelect() {
-  const select = document.getElementById('create-conversation');
-  const previous = select.value;
-  select.innerHTML = '';
-  const none = document.createElement('option');
-  none.value = '';
-  none.textContent = t('conv_none');
-  select.appendChild(none);
-
-  const ownConversations = conversations.filter((c) => me && c.user_id === me.id);
-  for (const c of ownConversations) {
-    const option = document.createElement('option');
-    option.value = String(c.id);
-    option.textContent = c.title;
-    select.appendChild(option);
-  }
-  if ([...select.options].some((opt) => opt.value === previous)) {
-    select.value = previous;
-  }
-}
-
-function renderExperiments() {
-  const box = document.getElementById('exp-list');
-  box.innerHTML = '';
-  if (!experiments.length) {
-    box.innerHTML = `<div class="empty">${t('no_experiments')}</div>`;
-    return;
-  }
-  for (const exp of experiments) {
-    const div = document.createElement('div');
-    div.className = 'item' + (activeExperiment && exp.id === activeExperiment.id ? ' active' : '');
-    div.onclick = () => openExperiment(exp.id);
-    div.innerHTML = `
-      <div class="name">${exp.title}</div>
-      <div class="meta">${statusLabel(exp.status)} · ${fmt(exp.updated_at)}</div>
-    `;
-    box.appendChild(div);
-  }
-}
-
-function renderVariants(variants) {
-  const box = document.getElementById('variant-list');
-  box.innerHTML = '';
-  if (!variants || !variants.length) {
-    box.innerHTML = `<div class="empty">${t('no_variants')}</div>`;
-    return;
-  }
-  for (const variant of variants) {
-    const card = document.createElement('div');
-    card.className = 'variant-card';
-    card.innerHTML = `
-      <div class="key">${variant.variant_key}</div>
-      <div class="mono">${(variant.content || '').replace(/</g, '&lt;')}</div>
-    `;
-    box.appendChild(card);
-  }
-}
-
-function renderExperimentDetail() {
-  const empty = document.getElementById('exp-detail-empty');
-  const panel = document.getElementById('exp-detail-panel');
-  if (!activeExperiment) {
-    empty.textContent = t('no_selected');
-    empty.classList.remove('hidden');
-    panel.classList.add('hidden');
-    return;
-  }
-  empty.classList.add('hidden');
-  panel.classList.remove('hidden');
-  document.getElementById('detail-name-input').value = activeExperiment.title || '';
-  document.getElementById('detail-hypothesis-input').value = activeExperiment.hypothesis || '';
-  document.getElementById('detail-updated').textContent = fmt(activeExperiment.updated_at);
-  document.getElementById('detail-traffic').value = pretty(activeExperiment.traffic_allocation || {});
-  document.getElementById('status-select').value = activeExperiment.status || 'draft';
-  document.getElementById('result-json').value = pretty(activeExperiment.result || {});
-  renderVariants(activeExperiment.variants || []);
-}
-
-async function refreshExperiments() {
-  experiments = await api('/api/experiments');
-  renderExperiments();
-  if (!activeExperiment && experiments.length) {
-    await openExperiment(experiments[0].id);
-  }
-}
-
-async function createExperiment() {
-  const title = document.getElementById('create-title').value.trim();
-  const hypothesis = document.getElementById('create-hypothesis').value.trim();
-  const conversationRaw = document.getElementById('create-conversation').value;
-  if (!title) {
-    setMsg(t('required_title'), true);
-    return;
-  }
-  if (!hypothesis) {
-    setMsg(t('required_hypothesis'), true);
-    return;
-  }
-  try {
-    const payload = {
-      title,
-      hypothesis,
-      conversation_id: conversationRaw ? Number(conversationRaw) : null,
-      traffic_allocation: parseJsonObject(document.getElementById('create-traffic').value, {}),
-    };
-    const created = await api('/api/experiments', {
-      method:'POST',
-      body: JSON.stringify(payload),
-    });
-    setMsg(t('create_ok'));
-    document.getElementById('create-title').value = '';
-    document.getElementById('create-hypothesis').value = '';
-    await refreshExperiments();
-    if (created && created.id) {
-      await openExperiment(created.id);
-    }
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function openExperiment(experimentId) {
-  try {
-    activeExperiment = await api(`/api/experiments/${experimentId}`);
-    renderExperiments();
-    renderExperimentDetail();
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function saveExperimentMeta() {
-  if (!activeExperiment) return;
-  const title = document.getElementById('detail-name-input').value.trim();
-  const hypothesis = document.getElementById('detail-hypothesis-input').value.trim();
-  if (!title) {
-    setMsg(t('required_title'), true);
-    return;
-  }
-  if (!hypothesis) {
-    setMsg(t('required_hypothesis'), true);
-    return;
-  }
-  try {
-    await api(`/api/experiments/${activeExperiment.id}`, {
-      method:'PATCH',
-      body: JSON.stringify({
-        title,
-        hypothesis,
-        traffic_allocation: parseJsonObject(document.getElementById('detail-traffic').value, {}),
-      }),
-    });
-    setMsg(t('update_ok'));
-    await openExperiment(activeExperiment.id);
-    experiments = await api('/api/experiments');
-    renderExperiments();
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function saveStatusAndResult() {
-  if (!activeExperiment) return;
-  try {
-    const payload = {
-      status: document.getElementById('status-select').value,
-      result: parseJsonObject(document.getElementById('result-json').value, {}),
-    };
-    await api(`/api/experiments/${activeExperiment.id}/status`, {
-      method:'PATCH',
-      body: JSON.stringify(payload),
-    });
-    setMsg(t('update_ok'));
-    await openExperiment(activeExperiment.id);
-    experiments = await api('/api/experiments');
-    renderExperiments();
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function deleteExperiment() {
-  if (!activeExperiment) return;
-  if (!confirm(t('delete_confirm'))) return;
-  try {
-    const deletingId = activeExperiment.id;
-    await api(`/api/experiments/${deletingId}`, {method:'DELETE'});
-    setMsg(t('delete_ok'));
-    activeExperiment = null;
-    await refreshExperiments();
-    if (!experiments.length) {
-      renderExperimentDetail();
-    }
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function saveVariant() {
-  if (!activeExperiment) return;
-  const variant_key = document.getElementById('variant-key').value.trim();
-  const content = document.getElementById('variant-content').value.trim();
-  if (!variant_key) {
-    setMsg(t('required_variant_key'), true);
-    return;
-  }
-  if (!content) {
-    setMsg(t('required_variant_content'), true);
-    return;
-  }
-  try {
-    await api(`/api/experiments/${activeExperiment.id}/variants`, {
-      method:'POST',
-      body: JSON.stringify({variant_key, content}),
-    });
-    setMsg(t('variant_ok'));
-    document.getElementById('variant-content').value = '';
-    await openExperiment(activeExperiment.id);
-  } catch (e) {
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
-  }
-}
-
-async function logout() {
-  await api('/logout', {method:'POST'});
-  location.href = '/';
-}
-
-function gotoApp() { location.href = '/app'; }
-function gotoKB() { location.href = '/kb'; }
-function gotoGroups() { location.href = '/groups'; }
-function gotoAdmin() { location.href = '/admin'; }
-
-(async function init() {
-  applyI18n();
-  try {
-    await loadCsrfToken();
-    me = await api('/api/me');
-    if (me && me.is_admin) {
-      document.getElementById('admin-btn').style.display = 'inline-block';
-    }
-    try {
-      conversations = await api('/api/conversations');
-    } catch (e) {
-      if (isAuthError(e)) throw e;
-      conversations = [];
-      setMsg(`${t('request_failed')}: ${e.message}`, true);
-    }
-    renderConversationSelect();
-    try {
-      await refreshExperiments();
-      renderExperimentDetail();
-    } catch (e) {
-      if (isAuthError(e)) throw e;
-      experiments = [];
-      activeExperiment = null;
-      renderExperiments();
-      renderExperimentDetail();
-      setMsg(`${t('request_failed')}: ${e.message}`, true);
-    }
-  } catch (e) {
-    if (isAuthError(e)) {
-      location.href = '/';
-      return;
-    }
-    setMsg(`${t('request_failed')}: ${e.message}`, true);
   }
 })();
 </script>

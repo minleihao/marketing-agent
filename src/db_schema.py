@@ -206,30 +206,6 @@ def _init_db_sqlite(conn: Any, *, default_model_id: str, default_thinking_depth:
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS experiments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_user_id INTEGER NOT NULL,
-            conversation_id INTEGER,
-            title TEXT NOT NULL,
-            hypothesis TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'draft',
-            traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
-            result_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(owner_user_id) REFERENCES users(id),
-            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS experiment_variants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            experiment_id INTEGER NOT NULL,
-            variant_key TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(experiment_id) REFERENCES experiments(id),
-            UNIQUE(experiment_id, variant_key)
-        );
         """
     )
 
@@ -414,30 +390,6 @@ def _init_db_postgres(conn: Any, *, default_model_id: str, default_thinking_dept
             created_at TEXT NOT NULL
         )
         """,
-        """
-        CREATE TABLE IF NOT EXISTS experiments (
-            id BIGSERIAL PRIMARY KEY,
-            owner_user_id BIGINT NOT NULL REFERENCES users(id),
-            conversation_id BIGINT REFERENCES conversations(id),
-            title TEXT NOT NULL,
-            hypothesis TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'draft',
-            traffic_allocation_json TEXT NOT NULL DEFAULT '{}',
-            result_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS experiment_variants (
-            id BIGSERIAL PRIMARY KEY,
-            experiment_id BIGINT NOT NULL REFERENCES experiments(id),
-            variant_key TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(experiment_id, variant_key)
-        )
-        """,
     ]
     for stmt in schema_statements:
         conn.execute(stmt)
@@ -494,4 +446,3 @@ def init_db(
             default_admin_password=default_admin_password,
             enforce_default_admin_password_change=enforce_default_admin_password_change,
         )
-

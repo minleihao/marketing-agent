@@ -255,83 +255,6 @@ def test_cannot_bind_private_kb_owned_by_other_user(webapp_module):
         assert "No access to this Knowledge Base version" in attach_res.text
 
 
-def test_experiment_lifecycle_api(webapp_module):
-    with TestClient(webapp_module.app) as client:
-        headers = _register(client, "exp_user")
-        conv_res = client.post(
-            "/api/conversations",
-            json={"task_mode": "marketing"},
-            headers=headers,
-        )
-        assert conv_res.status_code == 200, conv_res.text
-        conversation_id = conv_res.json()["id"]
-
-        create_res = client.post(
-            "/api/experiments",
-            json={
-                "title": "Hook A/B Test",
-                "hypothesis": "Outcome-first hook should improve CTR.",
-                "conversation_id": conversation_id,
-                "traffic_allocation": {"A": 50, "B": 50},
-            },
-            headers=headers,
-        )
-        assert create_res.status_code == 200, create_res.text
-        experiment_id = create_res.json()["id"]
-        assert experiment_id > 0
-
-        variant_res = client.post(
-            f"/api/experiments/{experiment_id}/variants",
-            json={"variant_key": "A", "content": "Version A copy"},
-            headers=headers,
-        )
-        assert variant_res.status_code == 200, variant_res.text
-        assert variant_res.json()["ok"] is True
-
-        detail_res = client.get(f"/api/experiments/{experiment_id}")
-        assert detail_res.status_code == 200, detail_res.text
-        detail = detail_res.json()
-        assert detail["title"] == "Hook A/B Test"
-        assert detail["traffic_allocation"] == {"A": 50, "B": 50}
-        assert len(detail["variants"]) == 1
-        assert detail["variants"][0]["variant_key"] == "a"
-
-        meta_res = client.patch(
-            f"/api/experiments/{experiment_id}",
-            json={
-                "title": "Hook A/B Test v2",
-                "hypothesis": "Problem-first hook may outperform outcome-first for this audience.",
-                "traffic_allocation": {"A": 40, "B": 60},
-            },
-            headers=headers,
-        )
-        assert meta_res.status_code == 200, meta_res.text
-        assert meta_res.json()["ok"] is True
-
-        status_res = client.patch(
-            f"/api/experiments/{experiment_id}/status",
-            json={"status": "running", "result": {"ctr_lift": 0.12}},
-            headers=headers,
-        )
-        assert status_res.status_code == 200, status_res.text
-        assert status_res.json()["ok"] is True
-
-        detail_res_2 = client.get(f"/api/experiments/{experiment_id}")
-        assert detail_res_2.status_code == 200, detail_res_2.text
-        detail_2 = detail_res_2.json()
-        assert detail_2["title"] == "Hook A/B Test v2"
-        assert detail_2["traffic_allocation"] == {"A": 40, "B": 60}
-        assert detail_2["status"] == "running"
-        assert detail_2["result"] == {"ctr_lift": 0.12}
-
-        delete_res = client.delete(f"/api/experiments/{experiment_id}", headers=headers)
-        assert delete_res.status_code == 200, delete_res.text
-        assert delete_res.json()["ok"] is True
-
-        not_found_res = client.get(f"/api/experiments/{experiment_id}")
-        assert not_found_res.status_code == 404
-
-
 def test_create_group_rejects_blank_name_after_trim(webapp_module):
     with TestClient(webapp_module.app) as client:
         headers = _register(client, "group_blank_name_user")
@@ -781,7 +704,15 @@ def test_delete_group_detaches_shared_conversation_and_kb_visibility(webapp_modu
 def test_authenticated_static_pages_render_successfully(webapp_module):
     with TestClient(webapp_module.app) as client:
         _register(client, "page_smoke_user")
-        for path in ("/app", "/kb", "/groups", "/experiments"):
+        for path in ("/app", "/kb", "/groups"):
             res = client.get(path)
             assert res.status_code == 200, f"{path} failed: {res.status_code} {res.text[:120]}"
             assert "Marketing Copilot" in res.text
+
+
+def test_experiment_routes_are_not_available(webapp_module):
+    with TestClient(webapp_module.app) as client:
+        _register(client, "page_no_experiments_user")
+        for path in ("/experiments", "/api/experiments"):
+            res = client.get(path)
+            assert res.status_code == 404, f"{path} should be removed"

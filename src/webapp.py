@@ -44,10 +44,6 @@ from webapp_schemas import (
     ConversationThinkingDepthInput,
     ConversationTitleInput,
     ConversationVisibilityInput,
-    ExperimentCreateInput,
-    ExperimentStatusInput,
-    ExperimentUpdateInput,
-    ExperimentVariantInput,
     GroupCreateInput,
     GroupInviteInput,
     GroupTransferAdminInput,
@@ -55,7 +51,7 @@ from webapp_schemas import (
     MessageInput,
     RegisterInput,
 )
-from webapp_templates import ADMIN_HTML, APP_HTML, AUTH_HTML, EXPERIMENTS_HTML, GROUPS_HTML, KB_HTML
+from webapp_templates import ADMIN_HTML, APP_HTML, AUTH_HTML, GROUPS_HTML, KB_HTML
 
 
 def _load_runtime_functions() -> tuple[Any, Any | None]:
@@ -986,13 +982,6 @@ def groups_page(request: Request) -> Any:
     return _html_response(GROUPS_HTML)
 
 
-@app.get("/experiments", response_class=HTMLResponse)
-def experiments_page(request: Request) -> Any:
-    if not current_user(request):
-        return RedirectResponse(url="/", status_code=302)
-    return _html_response(EXPERIMENTS_HTML)
-
-
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request) -> Any:
     user = current_user(request)
@@ -1465,208 +1454,6 @@ def transfer_group_admin(group_id: int, body: GroupTransferAdminInput, request: 
             (group_id, new_admin_id),
         )
     return {"ok": True, "new_admin_user_id": new_admin_id}
-
-
-@app.get("/api/experiments")
-def list_experiments(request: Request) -> Any:
-    user = must_login(request)
-    with db_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
-                   traffic_allocation_json, result_json, created_at, updated_at
-            FROM experiments
-            WHERE owner_user_id = ?
-            ORDER BY updated_at DESC
-            """,
-            (user["id"],),
-        ).fetchall()
-    data = []
-    for row in rows:
-        item = dict(row)
-        item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
-        item["result"] = _json_loads(item.pop("result_json"), {})
-        data.append(item)
-    return data
-
-
-@app.post("/api/experiments")
-def create_experiment(body: ExperimentCreateInput, request: Request) -> Any:
-    user = must_login(request)
-    now = now_utc().isoformat()
-    conversation_id = body.conversation_id
-    if conversation_id is not None:
-        conversation_owner_or_404(user["id"], conversation_id)
-    with db_conn() as conn:
-        experiment_id = _insert_and_get_id(
-            conn,
-            """
-            INSERT INTO experiments (
-                owner_user_id, conversation_id, title, hypothesis, status,
-                traffic_allocation_json, result_json, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, 'draft', ?, '{}', ?, ?)
-            """,
-            (
-                user["id"],
-                conversation_id,
-                body.title.strip()[:160],
-                body.hypothesis.strip()[:2000],
-                _json_dumps(body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}),
-                now,
-                now,
-            ),
-        )
-    return {"ok": True, "id": experiment_id}
-
-
-@app.get("/api/experiments/{experiment_id}")
-def get_experiment(experiment_id: int, request: Request) -> Any:
-    user = must_login(request)
-    with db_conn() as conn:
-        exp = conn.execute(
-            """
-            SELECT id, owner_user_id, conversation_id, title, hypothesis, status,
-                   traffic_allocation_json, result_json, created_at, updated_at
-            FROM experiments
-            WHERE id = ? AND owner_user_id = ?
-            """,
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        variants = conn.execute(
-            """
-            SELECT id, variant_key, content, created_at
-            FROM experiment_variants
-            WHERE experiment_id = ?
-            ORDER BY id ASC
-            """,
-            (experiment_id,),
-        ).fetchall()
-    item = dict(exp)
-    item["traffic_allocation"] = _json_loads(item.pop("traffic_allocation_json"), {})
-    item["result"] = _json_loads(item.pop("result_json"), {})
-    item["variants"] = [dict(v) for v in variants]
-    return item
-
-
-@app.patch("/api/experiments/{experiment_id}")
-def update_experiment(experiment_id: int, body: ExperimentUpdateInput, request: Request) -> Any:
-    user = must_login(request)
-    updates: dict[str, Any] = {}
-    if body.title is not None:
-        title = body.title.strip()
-        if not title:
-            raise HTTPException(status_code=400, detail="title cannot be empty")
-        updates["title"] = title[:160]
-    if body.hypothesis is not None:
-        hypothesis = body.hypothesis.strip()
-        if not hypothesis:
-            raise HTTPException(status_code=400, detail="hypothesis cannot be empty")
-        updates["hypothesis"] = hypothesis[:2000]
-    if body.traffic_allocation is not None:
-        updates["traffic_allocation_json"] = _json_dumps(
-            body.traffic_allocation if isinstance(body.traffic_allocation, dict) else {}
-        )
-    if not updates:
-        raise HTTPException(status_code=400, detail="No valid fields to update")
-
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        set_sql = ", ".join([f"{key} = ?" for key in updates.keys()] + ["updated_at = ?"])
-        values = list(updates.values()) + [now, experiment_id]
-        conn.execute(f"UPDATE experiments SET {set_sql} WHERE id = ?", tuple(values))
-    return {"ok": True}
-
-
-@app.post("/api/experiments/{experiment_id}/variants")
-def upsert_experiment_variant(experiment_id: int, body: ExperimentVariantInput, request: Request) -> Any:
-    user = must_login(request)
-    key = body.variant_key.strip().lower()
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        existing = conn.execute(
-            """
-            SELECT id FROM experiment_variants
-            WHERE experiment_id = ? AND variant_key = ?
-            """,
-            (experiment_id, key[:40]),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """
-                UPDATE experiment_variants
-                SET content = ?
-                WHERE experiment_id = ? AND variant_key = ?
-                """,
-                (body.content.strip()[:10000], experiment_id, key[:40]),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO experiment_variants (experiment_id, variant_key, content, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (experiment_id, key[:40], body.content.strip()[:10000], now),
-            )
-        conn.execute(
-            "UPDATE experiments SET updated_at = ? WHERE id = ?",
-            (now, experiment_id),
-        )
-    return {"ok": True}
-
-
-@app.patch("/api/experiments/{experiment_id}/status")
-def update_experiment_status(experiment_id: int, body: ExperimentStatusInput, request: Request) -> Any:
-    user = must_login(request)
-    status = body.status.strip().lower()
-    if status not in {"draft", "running", "paused", "completed", "archived"}:
-        raise HTTPException(status_code=400, detail="Unsupported experiment status")
-    now = now_utc().isoformat()
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        conn.execute(
-            """
-            UPDATE experiments
-            SET status = ?, result_json = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (status, _json_dumps(body.result if isinstance(body.result, dict) else {}), now, experiment_id),
-        )
-    return {"ok": True}
-
-
-@app.delete("/api/experiments/{experiment_id}")
-def delete_experiment(experiment_id: int, request: Request) -> Any:
-    user = must_login(request)
-    with db_conn() as conn:
-        exp = conn.execute(
-            "SELECT id FROM experiments WHERE id = ? AND owner_user_id = ?",
-            (experiment_id, user["id"]),
-        ).fetchone()
-        if not exp:
-            raise HTTPException(status_code=404, detail="Experiment not found")
-        conn.execute("DELETE FROM experiment_variants WHERE experiment_id = ?", (experiment_id,))
-        conn.execute("DELETE FROM experiments WHERE id = ?", (experiment_id,))
-    return {"ok": True}
 
 
 @app.get("/api/kb/list")
